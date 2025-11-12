@@ -1,0 +1,5 @@
+streamlit==1.39.0
+pandas>=2.0
+numpy>=1.24
+altair>=5.0
+python-dateutil>=2.8
