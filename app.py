@@ -66,16 +66,18 @@ def agregar_periodo(df_src: pd.DataFrame, gran: str, col_fecha: str) -> pd.DataF
     else:  # "Mes"
         g["periodo"] = g[col_fecha].dt.to_period("M").dt.to_timestamp()
     return g
-# ---------- Sidebar: filtros ----------
-st.sidebar.header("Filtros")
 
-# Botón manual para refrescar datos
+
+
+# ---------- Carga de datos (con botón de refresco) ----------
+st.sidebar.header("Datos")
+
 if st.sidebar.button("🔄 Actualizar datos de Google Sheets"):
-    load_data.clear()          # limpia la caché SOLO de load_data
-    st.experimental_rerun()    # vuelve a correr la app desde el inicio
+    # Limpia la caché de load_data y vuelve a correr el script
+    load_data.clear()
+    st.experimental_rerun()
 
-
-# ---------- Carga de datos ----------
+# Ahora sí cargamos los datos (después del botón)
 df = load_data()
 
 # Columnas base (usa EXACTAMENTE estos nombres)
@@ -99,6 +101,7 @@ df[COL_SUBTOT] = (
 
 # ---------- Sidebar: filtros ----------
 st.sidebar.header("Filtros")
+
 
 if df[COL_FECHA].notna().any():
     min_f = df[COL_FECHA].min()
