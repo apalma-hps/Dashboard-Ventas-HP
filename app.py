@@ -72,10 +72,10 @@ def agregar_periodo(df_src: pd.DataFrame, gran: str, col_fecha: str) -> pd.DataF
 # ---------- Carga de datos (con botón de refresco) ----------
 st.sidebar.header("Datos")
 
-if st.sidebar.button("🔄 Actualizar datos de Google Sheets"):
-    # Limpia la caché de load_data y vuelve a correr el script
-    load_data.clear()
-    st.experimental_rerun()
+if st.sidebar.button("🔄 Actualizar"):
+    load_data.clear()   # limpia la caché SOLO de load_data
+    st.rerun()          # en versiones nuevas de Streamlit
+
 
 # Ahora sí cargamos los datos (después del botón)
 df = load_data()
