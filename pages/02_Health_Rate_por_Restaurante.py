@@ -438,7 +438,7 @@ for rest_name, tab in zip(rests, tabs):
         # =========================================================
         # Conteo por concepto (base + complementos) + Clasificación
         # =========================================================
-        st.markdown(#### Ventas Estimadas por Concepto)
+        st.markdown("#### Ventas Estimadas por Concepto")
 
         if COL_DETALLE not in data_rest.columns:
             st.info("No existe la columna 'Detalle Items' en la base de datos.")
