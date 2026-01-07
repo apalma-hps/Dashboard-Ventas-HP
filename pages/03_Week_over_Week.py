@@ -192,16 +192,20 @@ def filtrar_periodo(df, inicio, fin, restaurante=None):
         out = out[out[COL_CC] == restaurante]
     return out
 
+# =========================================================
+# MÉTRICAS + COLOR DELTAS (REEMPLAZA ESTAS FUNCIONES)
+# =========================================================
+
 def calcular_metricas(df_periodo: pd.DataFrame):
     """
     KPIs:
-    - ventas: suma ventas_efectivas
+    - ventas: suma ventas_efectivas (dinero)
     - tickets: folios únicos donde ventas_efectivas > 0
-    - cancelados: folios únicos donde Estado=void   (robusto)
+    - cancelados: folios únicos donde Estado=void
     - ticket_promedio: ventas / tickets
-    - ventas_delivery: ventas_efectivas donde Tipo contiene delivery
-    - pct_delivery: ventas_delivery / ventas
-    - orders_per_day: tickets / días únicos del periodo con datos
+    - ventas_delivery: suma ventas_efectivas donde Tipo contiene delivery (dinero)
+    - pct_delivery: ventas_delivery / ventas  (dinero/dinero) ✅
+    - orders_per_day: tickets / días únicos (ENTERO) ✅
     """
     if df_periodo is None or df_periodo.empty:
         return {
@@ -211,7 +215,7 @@ def calcular_metricas(df_periodo: pd.DataFrame):
             "ticket_promedio": 0.0,
             "ventas_delivery": 0.0,
             "pct_delivery": 0.0,
-            "orders_per_day": 0.0,
+            "orders_per_day": 0,  # ✅ entero
         }
 
     ventas = float(df_periodo[COL_VENTAS].sum())
@@ -219,7 +223,6 @@ def calcular_metricas(df_periodo: pd.DataFrame):
     tickets_validos = df_periodo[df_periodo[COL_VENTAS] > 0]
     tickets = int(tickets_validos[COL_FOLIO].nunique()) if COL_FOLIO in tickets_validos.columns else 0
 
-    # ✅ Cancelados: folios únicos con Estado=void (si existe Estado y Folio)
     cancelados = 0
     if (COL_ESTADO in df_periodo.columns) and (COL_FOLIO in df_periodo.columns):
         estado_norm = df_periodo[COL_ESTADO].astype(str).str.strip().str.lower()
@@ -227,6 +230,7 @@ def calcular_metricas(df_periodo: pd.DataFrame):
 
     ticket_promedio = float(ventas / tickets) if tickets > 0 else 0.0
 
+    # ✅ ventas_delivery en dinero (ventas_efectivas) para que %delivery sea dinero/dinero
     if COL_TIPO in df_periodo.columns:
         ventas_delivery = float(df_periodo.loc[df_periodo[COL_TIPO].map(is_delivery), COL_VENTAS].sum())
     else:
@@ -235,7 +239,7 @@ def calcular_metricas(df_periodo: pd.DataFrame):
     pct_delivery = float(ventas_delivery / ventas) if ventas > 0 else 0.0
 
     dias_unicos = int(df_periodo[COL_FECHA].dt.date.nunique())
-    orders_per_day = float(tickets / dias_unicos) if dias_unicos > 0 else 0.0
+    orders_per_day = int(round(tickets / dias_unicos)) if dias_unicos > 0 else 0  # ✅ entero
 
     return {
         "ventas": ventas,
@@ -246,10 +250,17 @@ def calcular_metricas(df_periodo: pd.DataFrame):
         "pct_delivery": pct_delivery,
         "orders_per_day": orders_per_day,
     }
+
 def delta_color(change, invert: bool = False):
     """
-    - invert=False: positivo=verde, negativo=rojo (normal)
-    - invert=True : positivo=rojo, negativo=verde (para KPIs "malos" como Cancelados)
+    Streamlit st.metric:
+    - normal  => positivo verde, negativo rojo
+    - inverse => positivo rojo, negativo verde
+    - off     => sin delta / sin base
+
+    Regla:
+    - invert=False para KPIs "buenos" (sube=verde)
+    - invert=True  para KPIs "malos"  (sube=rojo) -> Cancelados
     """
     if change is None or pd.isna(change):
         return "off"
@@ -386,7 +397,7 @@ with c2:
 st.markdown("---")
 
 # =========================================================
-# WoW
+# KPIs WoW (REEMPLAZA TU BLOQUE COMPLETO)
 # =========================================================
 st.markdown("### Week over Week (WoW)")
 
@@ -396,22 +407,18 @@ cambio_ticket_prom_wow = safe_pct_change(metricas_sem_actual["ticket_promedio"],
 cambio_orders_day_wow = safe_pct_change(metricas_sem_actual["orders_per_day"], metricas_sem_anterior["orders_per_day"])
 cambio_cancelados_wow = safe_pct_change(metricas_sem_actual["cancelados"], metricas_sem_anterior["cancelados"])
 
-
-# Delivery: dos lecturas útiles (y no las mezcles):
-# 1) cambio relativo de ventas_delivery
+# Delivery:
 cambio_ventas_delivery_wow = safe_pct_change(metricas_sem_actual["ventas_delivery"], metricas_sem_anterior["ventas_delivery"])
-# 2) cambio en participación (pp)
-cambio_pct_delivery_wow_pp = (metricas_sem_actual["pct_delivery"] - metricas_sem_anterior["pct_delivery"]) if True else None
+cambio_pct_delivery_wow_pp = (metricas_sem_actual["pct_delivery"] - metricas_sem_anterior["pct_delivery"])
 
 col1, col2, col3, col4, col5, col6 = st.columns(6)
-
 
 with col1:
     st.metric(
         "Ventas",
         fmt_money(metricas_sem_actual["ventas"]),
         delta=f"{fmt_change_ratio(cambio_ventas_wow)} vs sem. anterior",
-        delta_color="normal" if (cambio_ventas_wow is not None and cambio_ventas_wow > 0) else ("inverse" if (cambio_ventas_wow is not None and cambio_ventas_wow < 0) else "off"),
+        delta_color=delta_color(cambio_ventas_wow, invert=False),
     )
 
 with col2:
@@ -419,14 +426,15 @@ with col2:
         "Tickets",
         f"{metricas_sem_actual['tickets']:,.0f}",
         delta=f"{fmt_change_ratio(cambio_tickets_wow)} vs sem. anterior",
-        delta_color="normal" if (cambio_tickets_wow is not None and cambio_tickets_wow > 0) else ("inverse" if (cambio_tickets_wow is not None and cambio_tickets_wow < 0) else "off"),
+        delta_color=delta_color(cambio_tickets_wow, invert=False),
     )
+
 with col3:
     st.metric(
         "Cancelados",
         f"{metricas_sem_actual['cancelados']:,.0f}",
         delta=f"{fmt_change_ratio(cambio_cancelados_wow)} vs sem. anterior",
-        delta_color="inverse" if (cambio_cancelados_wow is not None and cambio_cancelados_wow > 0) else ("normal" if (cambio_cancelados_wow is not None and cambio_cancelados_wow < 0) else "off"),
+        delta_color=delta_color(cambio_cancelados_wow, invert=True),  # ✅ al revés
     )
 
 with col4:
@@ -434,15 +442,15 @@ with col4:
         "Ticket Prom.",
         fmt_money(metricas_sem_actual["ticket_promedio"]),
         delta=f"{fmt_change_ratio(cambio_ticket_prom_wow)} vs sem. anterior",
-        delta_color="normal" if (cambio_ticket_prom_wow is not None and cambio_ticket_prom_wow > 0) else ("inverse" if (cambio_ticket_prom_wow is not None and cambio_ticket_prom_wow < 0) else "off"),
+        delta_color=delta_color(cambio_ticket_prom_wow, invert=False),
     )
 
 with col5:
     st.metric(
         "Órdenes / día",
-        f"{metricas_sem_actual['orders_per_day']:,.1f}",
+        f"{metricas_sem_actual['orders_per_day']:,.0f}",  # ✅ entero
         delta=f"{fmt_change_ratio(cambio_orders_day_wow)} vs sem. anterior",
-        delta_color="normal" if (cambio_orders_day_wow is not None and cambio_orders_day_wow > 0) else ("inverse" if (cambio_orders_day_wow is not None and cambio_orders_day_wow < 0) else "off"),
+        delta_color=delta_color(cambio_orders_day_wow, invert=False),
     )
 
 with col6:
@@ -450,18 +458,19 @@ with col6:
         "% Delivery",
         fmt_pct(metricas_sem_actual["pct_delivery"]),
         delta=f"{fmt_pp(cambio_pct_delivery_wow_pp)} vs sem. anterior",
-        delta_color="off",
+        delta_color=delta_color(cambio_pct_delivery_wow_pp, invert=False),  # ✅ ya no gris
     )
+
 
 st.markdown("#### Comparativa Detallada WoW")
 wow_data = pd.DataFrame({
-    "Métrica": ["Ventas", "Tickets","Cancelados", "Ticket Promedio", "Órdenes / día", "Ventas Delivery", "% Delivery"],
+    "Métrica": ["Ventas", "Tickets", "Cancelados", "Ticket Promedio", "Órdenes / día", "Ventas Delivery", "% Delivery"],
     "Semana Anterior": [
         fmt_money(metricas_sem_anterior["ventas"]),
         f"{metricas_sem_anterior['tickets']:,.0f}",
         f"{metricas_sem_anterior['cancelados']:,.0f}",
         fmt_money(metricas_sem_anterior["ticket_promedio"]),
-        f"{metricas_sem_anterior['orders_per_day']:,.1f}",
+        f"{metricas_sem_anterior['orders_per_day']:,.0f}",  # ✅ entero
         fmt_money(metricas_sem_anterior["ventas_delivery"]),
         fmt_pct(metricas_sem_anterior["pct_delivery"]),
     ],
@@ -470,7 +479,7 @@ wow_data = pd.DataFrame({
         f"{metricas_sem_actual['tickets']:,.0f}",
         f"{metricas_sem_actual['cancelados']:,.0f}",
         fmt_money(metricas_sem_actual["ticket_promedio"]),
-        f"{metricas_sem_actual['orders_per_day']:,.1f}",
+        f"{metricas_sem_actual['orders_per_day']:,.0f}",  # ✅ entero
         fmt_money(metricas_sem_actual["ventas_delivery"]),
         fmt_pct(metricas_sem_actual["pct_delivery"]),
     ],
@@ -488,19 +497,20 @@ st.dataframe(wow_data.set_index("Métrica"), use_container_width=True)
 
 st.markdown("---")
 
+
 # =========================================================
-# 4WoW
+# KPIs 4WoW (REEMPLAZA TU BLOQUE COMPLETO)
 # =========================================================
 st.markdown("### 4 Weeks vs 4 Weeks (4WoW)")
 
 cambio_ventas_4wow = safe_pct_change(metricas_4sem_actual["ventas"], metricas_4sem_anterior["ventas"])
 cambio_tickets_4wow = safe_pct_change(metricas_4sem_actual["tickets"], metricas_4sem_anterior["tickets"])
-cambio_cancelados_4wow = safe_pct_change(metricas_4sem_actual["cancelados"], metricas_4sem_anterior["cancelados"])
 cambio_ticket_prom_4wow = safe_pct_change(metricas_4sem_actual["ticket_promedio"], metricas_4sem_anterior["ticket_promedio"])
 cambio_orders_day_4wow = safe_pct_change(metricas_4sem_actual["orders_per_day"], metricas_4sem_anterior["orders_per_day"])
 
+# Delivery:
 cambio_ventas_delivery_4wow = safe_pct_change(metricas_4sem_actual["ventas_delivery"], metricas_4sem_anterior["ventas_delivery"])
-cambio_pct_delivery_4wow_pp = (metricas_4sem_actual["pct_delivery"] - metricas_4sem_anterior["pct_delivery"]) if True else None
+cambio_pct_delivery_4wow_pp = (metricas_4sem_actual["pct_delivery"] - metricas_4sem_anterior["pct_delivery"])
 
 col1, col2, col3, col4, col5 = st.columns(5)
 
@@ -509,7 +519,7 @@ with col1:
         "Ventas",
         fmt_money(metricas_4sem_actual["ventas"]),
         delta=f"{fmt_change_ratio(cambio_ventas_4wow)} vs 4 sem. anteriores",
-        delta_color="normal" if (cambio_ventas_4wow is not None and cambio_ventas_4wow > 0) else ("inverse" if (cambio_ventas_4wow is not None and cambio_ventas_4wow < 0) else "off"),
+        delta_color=delta_color(cambio_ventas_4wow, invert=False),
     )
 
 with col2:
@@ -517,7 +527,7 @@ with col2:
         "Tickets",
         f"{metricas_4sem_actual['tickets']:,.0f}",
         delta=f"{fmt_change_ratio(cambio_tickets_4wow)} vs 4 sem. anteriores",
-        delta_color="normal" if (cambio_tickets_4wow is not None and cambio_tickets_4wow > 0) else ("inverse" if (cambio_tickets_4wow is not None and cambio_tickets_4wow < 0) else "off"),
+        delta_color=delta_color(cambio_tickets_4wow, invert=False),
     )
 
 with col3:
@@ -525,15 +535,15 @@ with col3:
         "Ticket Prom.",
         fmt_money(metricas_4sem_actual["ticket_promedio"]),
         delta=f"{fmt_change_ratio(cambio_ticket_prom_4wow)} vs 4 sem. anteriores",
-        delta_color="normal" if (cambio_ticket_prom_4wow is not None and cambio_ticket_prom_4wow > 0) else ("inverse" if (cambio_ticket_prom_4wow is not None and cambio_ticket_prom_4wow < 0) else "off"),
+        delta_color=delta_color(cambio_ticket_prom_4wow, invert=False),
     )
 
 with col4:
     st.metric(
         "Órdenes / día",
-        f"{metricas_4sem_actual['orders_per_day']:,.1f}",
+        f"{metricas_4sem_actual['orders_per_day']:,.0f}",  # ✅ entero
         delta=f"{fmt_change_ratio(cambio_orders_day_4wow)} vs 4 sem. anteriores",
-        delta_color="normal" if (cambio_orders_day_4wow is not None and cambio_orders_day_4wow > 0) else ("inverse" if (cambio_orders_day_4wow is not None and cambio_orders_day_4wow < 0) else "off"),
+        delta_color=delta_color(cambio_orders_day_4wow, invert=False),
     )
 
 with col5:
@@ -541,7 +551,7 @@ with col5:
         "% Delivery",
         fmt_pct(metricas_4sem_actual["pct_delivery"]),
         delta=f"{fmt_pp(cambio_pct_delivery_4wow_pp)} vs 4 sem. anteriores",
-        delta_color="off",
+        delta_color=delta_color(cambio_pct_delivery_4wow_pp, invert=False),  # ✅ ya no gris
     )
 
 st.markdown("#### Comparativa Detallada 4WoW")
@@ -551,7 +561,7 @@ four_wow_data = pd.DataFrame({
         fmt_money(metricas_4sem_anterior["ventas"]),
         f"{metricas_4sem_anterior['tickets']:,.0f}",
         fmt_money(metricas_4sem_anterior["ticket_promedio"]),
-        f"{metricas_4sem_anterior['orders_per_day']:,.1f}",
+        f"{metricas_4sem_anterior['orders_per_day']:,.0f}",  # ✅ entero
         fmt_money(metricas_4sem_anterior["ventas_delivery"]),
         fmt_pct(metricas_4sem_anterior["pct_delivery"]),
     ],
@@ -559,7 +569,7 @@ four_wow_data = pd.DataFrame({
         fmt_money(metricas_4sem_actual["ventas"]),
         f"{metricas_4sem_actual['tickets']:,.0f}",
         fmt_money(metricas_4sem_actual["ticket_promedio"]),
-        f"{metricas_4sem_actual['orders_per_day']:,.1f}",
+        f"{metricas_4sem_actual['orders_per_day']:,.0f}",  # ✅ entero
         fmt_money(metricas_4sem_actual["ventas_delivery"]),
         fmt_pct(metricas_4sem_actual["pct_delivery"]),
     ],
@@ -575,7 +585,6 @@ four_wow_data = pd.DataFrame({
 st.dataframe(four_wow_data.set_index("Métrica"), use_container_width=True)
 
 st.markdown("---")
-
 # =========================================================
 # TENDENCIA SEMANAL (últimas 8 semanas desde semana seleccionada)
 # =========================================================
@@ -790,5 +799,4 @@ if rest_seleccionado == "Todos los restaurantes":
         .properties(height=min(700, 24 * max(8, len(df_chart2))))
     )
     st.altair_chart(ch_bar2, use_container_width=True)
-
 
