@@ -210,21 +210,31 @@ df = load_data()
 # Columnas base (usa EXACTAMENTE estos nombres)
 COL_CC = "Restaurante"     # CC / Marca
 COL_FECHA = "Fecha"        # fecha de la venta
-COL_SUBTOT = "Subtotal"    # ventas netas
+COL_TOTAL = "Total"
+COL_ESTADO= "Estado"# ventas netas
 COL_TIPO = "Tipo"          # detectar delivery
 COL_FOLIO = "Folio"        # tickets
 COL_DETALLE = "Detalle Items"  # para top productos / complementos
-COL_VENTAS = COL_SUBTOT
+COL_VENTAS = COL_TOTAL
 
 # Tipificación mínima
 df[COL_FECHA] = pd.to_datetime(df[COL_FECHA], errors="coerce", dayfirst=True)
 
-df[COL_SUBTOT] = (
-    df[COL_SUBTOT]
+
+df[COL_TOTAL] = (
+    df[COL_TOTAL]
     .astype(str)
     .str.replace(r"[\$,]", "", regex=True)
     .astype(float)
 )
+
+df = df[
+    df[COL_ESTADO]
+    .astype(str)
+    .str.strip()
+    .str.lower()
+    .ne("void")
+].copy()
 
 # ===== Header con Logo + Título Moderno =====
 LOGO_URL = "https://raw.githubusercontent.com/apalma-hps/Dashboard-Ventas-HP/main/logo_hp.png"
@@ -270,7 +280,7 @@ st.markdown(
                 color: #6F7277;
                 margin-top: 4px;
             ">
-                Dashboard ejecutivo · Rendimiento anual por marca
+                 Rendimiento mensual.
             </div>
         </div>
     </div>
