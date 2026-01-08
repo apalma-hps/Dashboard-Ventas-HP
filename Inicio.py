@@ -8,13 +8,7 @@ import altair as alt
 
 
 
-st.sidebar.markdown("### Actualización")
 
-if st.sidebar.button("🔄 Actualizar data"):
-    st.cache_data.clear()   # limpia caché de load_data / load_catalogo (y demás cache_data)
-    st.rerun()              # vuelve a ejecutar la app
-
-st.sidebar.caption(f"Última vista: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
 # ===== Tema de Altair (paleta profesional aqua/teal) =====
 
 
@@ -51,6 +45,14 @@ alt.themes.enable("byf_theme")
 
 
 st.set_page_config(page_title="Ops – Ventas", page_icon="📊", layout="wide")
+
+st.sidebar.markdown("### Actualización")
+
+if st.sidebar.button("🔄 Actualizar data"):
+    st.cache_data.clear()   # limpia caché de load_data / load_catalogo (y demás cache_data)
+    st.rerun()              # vuelve a ejecutar la app
+
+st.sidebar.caption(f"Última vista: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
 # ===== Estilos personalizados tipo "poster" (glassmorphism) =====
 
 
