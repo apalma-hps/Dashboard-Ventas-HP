@@ -8,13 +8,7 @@ from datetime import datetime
 import re
 import unicodedata
 
-st.sidebar.markdown("### Actualización")
 
-if st.sidebar.button("🔄 Actualizar data"):
-    st.cache_data.clear()   # limpia caché de load_data / load_catalogo (y demás cache_data)
-    st.rerun()              # vuelve a ejecutar la app
-
-st.sidebar.caption(f"Última vista: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
 
 # ============= CONFIG BÁSICA =============
 st.set_page_config(
@@ -23,6 +17,13 @@ st.set_page_config(
     layout="wide",
 )
 
+st.sidebar.markdown("### Actualización")
+
+if st.sidebar.button("🔄 Actualizar data"):
+    st.cache_data.clear()   # limpia caché de load_data / load_catalogo (y demás cache_data)
+    st.rerun()              # vuelve a ejecutar la app
+
+st.sidebar.caption(f"Última vista: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
 
 # ===== Tema de Altair (mismo que en app.py) =====
 def byf_altair_theme():
