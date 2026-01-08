@@ -8,10 +8,18 @@ from datetime import datetime
 import re
 import unicodedata
 
+st.sidebar.markdown("### Actualización")
+
+if st.sidebar.button("🔄 Actualizar data"):
+    st.cache_data.clear()   # limpia caché de load_data / load_catalogo (y demás cache_data)
+    st.rerun()              # vuelve a ejecutar la app
+
+st.sidebar.caption(f"Última vista: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+
 # ============= CONFIG BÁSICA =============
 st.set_page_config(
     page_title="Health Rate por Restaurante – Marcas HP",
-    page_icon="📊",
+    page_icon="",
     layout="wide",
 )
 
@@ -118,8 +126,8 @@ st.markdown("---")
 # =========================================================
 # URLs
 # =========================================================
-
-DATA_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQZBL6mvIC1OUC-p0MREMW_7UvMKb8It4Y_ldFOi3FbqP4cwZBLrDXwpA_hjBzkeZz3tsOBqd9BlamY/pub?output=csv"
+DATA_URL= "https://docs.google.com/spreadsheets/d/e/2PACX-1vSLIeswEs8OILxZmVMwObbli0Zpbbqx7g7h6ZC5Fwm0PCjlZEFy66L9Xpha6ROW3loFCIRiWvEnLRHS/pub?output=csv"
+#DATA_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQZBL6mvIC1OUC-p0MREMW_7UvMKb8It4Y_ldFOi3FbqP4cwZBLrDXwpA_hjBzkeZz3tsOBqd9BlamY/pub?output=csv"
 CATALOGO_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQtKQGyCaerGAedhlpzaXlr-ycmm1t08a6lUtg-_3f7yWtJhLkQ6vn0TlI89l0FGVxOUy1Cwj5ykliB/pub?output=csv"
 
 
