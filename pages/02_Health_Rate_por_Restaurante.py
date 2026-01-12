@@ -9,23 +9,23 @@ import re
 import unicodedata
 
 
+st.sidebar.caption(f"Última vista: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
 
 # ============= CONFIG BÁSICA =============
 st.set_page_config(
     page_title="Health Rate por Restaurante – Marcas HP",
-    page_icon="",
+    page_icon="📊",
     layout="wide",
 )
 
 st.sidebar.markdown("### Actualización")
 
 if st.sidebar.button("🔄 Actualizar data"):
-    st.cache_data.clear()   # limpia caché de load_data / load_catalogo (y demás cache_data)
-    st.rerun()              # vuelve a ejecutar la app
+    st.cache_data.clear()
+    st.rerun()
 
-st.sidebar.caption(f"Última vista: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
 
-# ===== Tema de Altair (mismo que en app.py) =====
+# ===== Tema de Altair =====
 def byf_altair_theme():
     return {
         "config": {
@@ -127,15 +127,13 @@ st.markdown("---")
 # =========================================================
 # URLs
 # =========================================================
-DATA_URL= "https://docs.google.com/spreadsheets/d/e/2PACX-1vSLIeswEs8OILxZmVMwObbli0Zpbbqx7g7h6ZC5Fwm0PCjlZEFy66L9Xpha6ROW3loFCIRiWvEnLRHS/pub?output=csv"
-#DATA_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQZBL6mvIC1OUC-p0MREMW_7UvMKb8It4Y_ldFOi3FbqP4cwZBLrDXwpA_hjBzkeZz3tsOBqd9BlamY/pub?output=csv"
+DATA_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSLIeswEs8OILxZmVMwObbli0Zpbbqx7g7h6ZC5Fwm0PCjlZEFy66L9Xpha6ROW3loFCIRiWvEnLRHS/pub?output=csv"
 CATALOGO_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQtKQGyCaerGAedhlpzaXlr-ycmm1t08a6lUtg-_3f7yWtJhLkQ6vn0TlI89l0FGVxOUy1Cwj5ykliB/pub?output=csv"
 
 
 # =========================================================
 # Helpers (formato / periodos)
 # =========================================================
-
 def fmt_money(x):
     return "—" if (x is None or pd.isna(x)) else f"${x:,.0f}"
 
@@ -163,11 +161,6 @@ def agregar_periodo(df_src: pd.DataFrame, gran: str, col_fecha: str) -> pd.DataF
 
 
 def clean_money_series(s: pd.Series) -> pd.Series:
-    """
-    Limpieza robusta para columnas de dinero:
-    - soporta $, comas, espacios, '—', vacío
-    - convierte a float con NaN donde no se pueda
-    """
     if s is None:
         return pd.Series(dtype="float64")
     s = s.astype(str).str.strip()
@@ -177,46 +170,42 @@ def clean_money_series(s: pd.Series) -> pd.Series:
     return pd.to_numeric(s, errors="coerce")
 
 
-# =========================================================
-# Normalización robusta para match (aplanado + vinculación)
-# =========================================================
-
 def norm_key(s: str) -> str:
     if s is None:
         return ""
     s = str(s).strip().lower()
-
     s = "".join(
         c for c in unicodedata.normalize("NFKD", s)
         if not unicodedata.combining(c)
     )
-
-    # conserva / y -
     s = re.sub(r"[^\w\s\/\-]", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     s = re.sub(r"\-+", "-", s).strip()
     return s
 
 
+def detect_tax_column(df_: pd.DataFrame) -> str | None:
+    candidates = ["Impuestos", "IVA", "Tax", "Taxes", "Impuesto", "VAT"]
+    for c in candidates:
+        if c in df_.columns:
+            return c
+    return None
+
+
+def get_void_mask(df_: pd.DataFrame, col_estado: str) -> pd.Series:
+    if col_estado in df_.columns:
+        return df_[col_estado].astype(str).str.strip().str.lower().eq("void")
+    return pd.Series(False, index=df_.index)
+
+
 # =========================================================
 # Parser (base + complementos) - MEJORADO
 # =========================================================
-
 def _parse_base_item(raw: str):
-    """
-    Parsea un item base extrayendo:
-    - nombre del producto
-    - cantidad (xN)
-    - precio total de la línea ($X.XX)
-
-    Ejemplo: "Burrito Chilangazo Combo x1 ($179.00)"
-    Retorna: ("Burrito Chilangazo Combo", 1, 179.0)
-    """
     txt = raw.strip()
     if not txt:
         return "", 0, None
 
-    # 1. Extraer precio total de línea: ($XXX.XX)
     precio_linea = None
     m_precio = re.search(r"\(\s*\$?\s*([\d\.,]+)\s*\)", txt)
     if m_precio:
@@ -225,22 +214,18 @@ def _parse_base_item(raw: str):
             precio_linea = float(num)
         except ValueError:
             precio_linea = None
-        # Eliminar el precio del texto
         txt = txt[:m_precio.start()].strip()
 
-    # 2. Extraer cantidad: xN (debe estar al final después de eliminar precio)
     qty = 1
     m_qty = re.search(r"\s+[xX]\s*(\d+)\s*$", txt)
     if m_qty:
         qty = int(m_qty.group(1))
-        # Eliminar la cantidad del texto
         txt = txt[:m_qty.start()].strip()
 
     nombre = txt.strip()
     if not nombre:
         return "", 0, None
 
-    # 3. Calcular precio unitario
     precio_unit = None
     if precio_linea is not None and qty > 0:
         precio_unit = precio_linea / qty
@@ -249,40 +234,21 @@ def _parse_base_item(raw: str):
 
 
 def parse_detalle_items_base_y_complementos(texto: str):
-    """
-    Parsea el detalle de items siguiendo este formato:
-
-    "Producto Base xN ($precio) [+Complemento1, +Complemento2] | Producto Base 2 xM ($precio2)"
-
-    Ejemplo:
-    "Burrito Chilangazo Combo x1 ($179.00) [+Salsa Verde, Coca Sin Azucar Combo] | Guacamolito x2 ($70.00)"
-
-    Retorna lista de dicts con:
-    - item: nombre del producto/complemento
-    - qty: cantidad
-    - precio_unitario: precio unitario (solo para productos base)
-    - tipo_concepto: "base" o "complemento"
-    """
     registros = []
     if not isinstance(texto, str) or not texto.strip():
         return registros
 
-    # Dividir por | para separar productos principales
     productos_principales = [p.strip() for p in texto.split("|") if p.strip()]
 
     for producto in productos_principales:
-        # Separar producto base de complementos usando corchetes []
         if "[" in producto and "]" in producto:
-            # Hay complementos
             partes = producto.split("[", 1)
             base_texto = partes[0].strip()
             complementos_texto = partes[1].split("]")[0].strip()
         else:
-            # No hay complementos
             base_texto = producto.strip()
             complementos_texto = ""
 
-        # Parsear producto base
         nombre_base, qty_base, precio_unit = _parse_base_item(base_texto)
 
         if nombre_base and qty_base > 0:
@@ -293,20 +259,16 @@ def parse_detalle_items_base_y_complementos(texto: str):
                 "tipo_concepto": "base",
             })
 
-        # Parsear complementos (cada uno cuenta como 1 unidad)
         if complementos_texto:
-            # Los complementos están separados por comas
             complementos = [c.strip() for c in complementos_texto.split(",") if c.strip()]
 
             for comp in complementos:
-                # Limpiar el símbolo + al inicio si existe
                 comp_limpio = comp.lstrip("+").strip()
-
                 if comp_limpio:
                     registros.append({
                         "item": comp_limpio,
-                        "qty": 1,  # Cada complemento cuenta como 1 unidad
-                        "precio_unitario": None,  # Los complementos no tienen precio individual
+                        "qty": 1,
+                        "precio_unitario": None,
                         "tipo_concepto": "complemento",
                     })
 
@@ -316,23 +278,15 @@ def parse_detalle_items_base_y_complementos(texto: str):
 # =========================================================
 # Carga de datos y catálogo
 # =========================================================
-
 @st.cache_data(ttl=600)
 def load_data() -> pd.DataFrame:
-    df = pd.read_csv(DATA_URL)
-    df.columns = [c.strip() for c in df.columns]
-    return df
+    df_ = pd.read_csv(DATA_URL)
+    df_.columns = [c.strip() for c in df_.columns]
+    return df_
 
 
 @st.cache_data(ttl=600)
 def load_catalogo() -> pd.DataFrame | None:
-    """
-    Catálogo con columnas:
-      - concepto
-      - tipo_concepto
-      - conteo_total (opcional)
-      - Categoria (incluye No contar / Contar como X / etc.)
-    """
     try:
         cat = pd.read_csv(CATALOGO_URL)
     except Exception as e:
@@ -349,14 +303,12 @@ def load_catalogo() -> pd.DataFrame | None:
     cat["tipo_concepto"] = cat["tipo_concepto"].astype(str).str.strip().str.lower()
     cat["Categoria_raw"] = cat["Categoria"].astype(str).str.strip()
 
-    # Instrucción: "Contar como X" o "Contar X"
     is_instr = cat["Categoria_raw"].str.match(r"(?i)^\s*contar\s+")
     m = cat["Categoria_raw"].str.extract(r"(?i)^\s*contar\s*(?:como\s+)?(.+?)\s*$")
 
     cat["concepto_canonico"] = np.where(is_instr, m[0].str.strip(), cat["concepto"])
     cat["Clasificación"] = np.where(is_instr, "REMAP", cat["Categoria_raw"])
 
-    # Llaves para merge robusto
     cat["concepto_key"] = cat["concepto"].map(norm_key)
     cat["canon_key"] = cat["concepto_canonico"].map(norm_key)
 
@@ -366,7 +318,6 @@ def load_catalogo() -> pd.DataFrame | None:
 # =========================================================
 # Preparación de DF principal
 # =========================================================
-
 df = load_data()
 catalogo = load_catalogo()
 
@@ -375,41 +326,49 @@ COL_ESTADO = "Estado"
 COL_FECHA = "Fecha"
 COL_SUBTOT = "Subtotal"
 COL_TOTAL = "Total"
+COL_DESCUENTOS = "Descuentos"
 COL_TIPO = "Tipo"
 COL_FOLIO = "Folio"
 COL_DETALLE = "Detalle Items"
 
-# 👇 esta será la columna que SIEMPRE usarán los cálculos de ventas
 COL_VENTAS = "ventas_efectivas"
 
 df[COL_FECHA] = pd.to_datetime(df[COL_FECHA], errors="coerce", dayfirst=True)
 
-# Validación de Total
 if COL_TOTAL not in df.columns:
     st.error("No existe la columna 'Total' en la base de datos. Revisa el Google Sheet publicado.")
     st.stop()
 
-# Limpieza robusta de Total (primero limpiamos)
-df[COL_TOTAL] = clean_money_series(df[COL_TOTAL])
+df[COL_TOTAL] = clean_money_series(df[COL_TOTAL]).fillna(0.0)
 
-# (opcional) limpiar Subtotal para auditoría
-if COL_SUBTOT in df.columns:
-    df[COL_SUBTOT] = clean_money_series(df[COL_SUBTOT])
-
-# Normalizamos Estado (si no existe, asumimos que NO es void)
-if COL_ESTADO in df.columns:
-    estado_norm = df[COL_ESTADO].astype(str).str.strip().str.lower()
-    is_void = estado_norm.eq("void")
+if COL_SUBTOT not in df.columns:
+    st.warning("No existe la columna 'Subtotal'. Se usará Subtotal = Total como fallback (puede afectar precisión).")
+    df[COL_SUBTOT] = df[COL_TOTAL]
 else:
-    is_void = pd.Series(False, index=df.index)
+    df[COL_SUBTOT] = clean_money_series(df[COL_SUBTOT]).fillna(0.0)
 
-# Ventas efectivas: Total, excepto void => 0
-df[COL_VENTAS] = np.where(is_void, 0.0, df[COL_TOTAL].fillna(0.0))
+if COL_DESCUENTOS not in df.columns:
+    st.warning("No existe la columna 'Descuentos'. Se asumirá descuento = 0.")
+    df[COL_DESCUENTOS] = 0.0
+else:
+    df[COL_DESCUENTOS] = clean_money_series(df[COL_DESCUENTOS]).fillna(0.0)
+
+tax_col = detect_tax_column(df)
+if tax_col is not None:
+    df["_impuestos"] = clean_money_series(df[tax_col]).fillna(0.0)
+else:
+    df["_impuestos"] = (df[COL_TOTAL] - df[COL_SUBTOT]).clip(lower=0.0)
+
+is_void = get_void_mask(df, COL_ESTADO)
+
+df["_calc_sti_d"] = (df[COL_SUBTOT] + df["_impuestos"] - df[COL_DESCUENTOS]).fillna(0.0)
+df["_ventas_brutas_regla"] = np.where(df["_calc_sti_d"] > df[COL_TOTAL], df[COL_TOTAL], df["_calc_sti_d"])
+
+df[COL_VENTAS] = np.where(is_void, 0.0, pd.Series(df["_ventas_brutas_regla"], index=df.index).clip(lower=0.0))
 
 # =========================================================
 # FILTROS
 # =========================================================
-
 st.sidebar.markdown("### Filtros")
 
 if df[COL_FECHA].notna().any():
@@ -443,29 +402,20 @@ if f_ini is not None and f_fin is not None:
     mask = (df_filt[COL_FECHA].dt.date >= ini_d) & (df_filt[COL_FECHA].dt.date <= fin_d)
     df_filt = df_filt[mask]
 
-# =========================================================
-# VALIDACIÓN POST-FILTRO + TABS
-# =========================================================
-
 if df_filt.empty:
     st.info("No hay datos en el rango de fechas seleccionado.")
     st.stop()
 
-# OJO: rests y tabs DEBEN DEFINIRSE AQUÍ, fuera de cualquier loop
 rests = sorted(df_filt[COL_CC].dropna().unique().tolist())
-
 if not rests:
     st.info("No hay restaurantes disponibles para el rango seleccionado.")
     st.stop()
-
-
 
 tabs = st.tabs(rests)
 
 # =========================================================
 # CONTENIDO POR RESTAURANTE
 # =========================================================
-
 for rest_name, tab in zip(rests, tabs):
     with tab:
         st.markdown(f"### {rest_name}")
@@ -475,38 +425,32 @@ for rest_name, tab in zip(rests, tabs):
             st.info("Sin datos para este restaurante en el rango seleccionado.")
             continue
 
-        # --- KPIs ---
-        # Ventas totales (excluyendo void)
-        ventas_total = data_rest[COL_VENTAS].sum()
+        is_void_r = get_void_mask(data_rest, COL_ESTADO)
 
-        # Número de tickets (excluyendo void)
-        tickets_validos = data_rest[data_rest[COL_VENTAS] > 0]
-        n_tickets = tickets_validos[COL_FOLIO].nunique() if COL_FOLIO in tickets_validos.columns else None
-        ticket_prom = (ventas_total / n_tickets) if n_tickets and n_tickets > 0 else None
+        ventas_total = float(data_rest[COL_VENTAS].sum())
+        descuentos_total = float(data_rest[COL_DESCUENTOS].sum())
 
-        # Promedio diario (solo considerando ventas efectivas)
-        dias_unicos = data_rest[COL_FECHA].dt.date.nunique()
-        prom_diario_ventas = (ventas_total / dias_unicos) if (ventas_total and dias_unicos) else None
+        # ✅ Tickets = Folios NO VOID (no depende de ventas>0)
+        n_tickets = int(data_rest.loc[~is_void_r, COL_FOLIO].nunique()) if COL_FOLIO in data_rest.columns else 0
+        ticket_prom = (ventas_total / n_tickets) if n_tickets > 0 else None
 
-        # Aportación de delivery (sobre ventas efectivas)
+        dias_unicos = int(data_rest[COL_FECHA].dt.date.nunique())
+        prom_diario_ventas = (ventas_total / dias_unicos) if (dias_unicos > 0) else None
+
         aport_delivery = None
         if COL_TIPO in data_rest.columns and ventas_total > 0:
-            tot_del = data_rest.loc[data_rest[COL_TIPO].map(is_delivery), COL_VENTAS].sum()
+            tot_del = float(data_rest.loc[data_rest[COL_TIPO].map(is_delivery), COL_VENTAS].sum())
             aport_delivery = tot_del / ventas_total
 
-        # Conteo de tickets void (para auditoría)
-        if COL_ESTADO in data_rest.columns:
-            n_void = data_rest[data_rest[COL_ESTADO].astype(str).str.strip().str.lower() == "void"].shape[0]
-        else:
-            n_void = 0
+        n_void = int(data_rest.loc[is_void_r, COL_FOLIO].nunique()) if COL_FOLIO in data_rest.columns else int(is_void_r.sum())
 
         kpi_rows = [
-            {"KPI": "Ventas Totales", "Valor": fmt_money(ventas_total)},
-            {"KPI": "Tickets Válidos", "Valor": f"{n_tickets:,}" if n_tickets is not None else "—"},
-            {"KPI": "Tickets Cancelados", "Valor": f"{n_void:,}"},
+            {"KPI": "Ventas Totales (netas)", "Valor": fmt_money(ventas_total)},
+            {"KPI": "Descuentos Totales", "Valor": fmt_money(descuentos_total)},
+            {"KPI": "Tickets (No Void)", "Valor": f"{n_tickets:,}"},
+            {"KPI": "Tickets Cancelados (Void)", "Valor": f"{n_void:,}"},
             {"KPI": "Ticket Promedio", "Valor": fmt_money(ticket_prom) if ticket_prom is not None else "—"},
-            {"KPI": "Promedio Diario de Ventas",
-             "Valor": fmt_money(prom_diario_ventas) if prom_diario_ventas is not None else "—"},
+            {"KPI": "Promedio Diario de Ventas", "Valor": fmt_money(prom_diario_ventas) if prom_diario_ventas is not None else "—"},
             {"KPI": "Aportación Delivery", "Valor": fmt_pct(aport_delivery) if aport_delivery is not None else "—"},
         ]
         st.dataframe(pd.DataFrame(kpi_rows).set_index("KPI"), use_container_width=True)
@@ -557,7 +501,6 @@ for rest_name, tab in zip(rests, tabs):
         df_flat["item_key"] = df_flat["item"].map(norm_key)
 
         if catalogo is None:
-            # fallback sin catálogo
             df_resumen = (
                 df_flat.groupby(["tipo_concepto", "item"], as_index=False)
                 .agg(
@@ -576,7 +519,6 @@ for rest_name, tab in zip(rests, tabs):
             )
             continue
 
-        # --- Merge robusto ---
         df_join = df_flat.merge(
             catalogo,
             left_on="item_key",
@@ -585,19 +527,12 @@ for rest_name, tab in zip(rests, tabs):
             suffixes=("", "_cat"),
         )
 
-        # --- Alias "Contar como X" / "Contar X" ---
         df_join["item_canonico"] = df_join["concepto_canonico"].fillna(df_join["item"]).astype(str).str.strip()
-
-        # --- Clasificación para tabs ---
         df_join["Clasificación"] = df_join["Clasificación"].fillna("Sin clasificación").astype(str).str.strip()
 
-        # --- Excluir No contar ---
         df_join = df_join[df_join["Clasificación"].str.strip().str.lower() != "no contar"]
-
-        # --- Quitar filas REMAP (solo eran alias) ---
         df_join = df_join[df_join["Clasificación"] != "REMAP"]
 
-        # Auditoría de no mapeados
         no_mapeados = (
             df_join[df_join["concepto"].isna()][["item", "item_key", "tipo_concepto"]]
             .drop_duplicates()
@@ -607,14 +542,12 @@ for rest_name, tab in zip(rests, tabs):
             with st.expander("⚠️ Conceptos sin clasificar (actualiza el catálogo)"):
                 st.dataframe(no_mapeados, use_container_width=True)
 
-        # Precio promedio SOLO para bases (complementos no traen precio)
         df_join["precio_unitario_base"] = np.where(
             df_join["tipo_concepto"].eq("base"),
             df_join["precio_unitario"],
             np.nan,
         )
 
-        # Agregación por Clasificación + concepto canónico
         df_resumen = (
             df_join
             .groupby(["Clasificación", "item_canonico"], as_index=False)
@@ -628,7 +561,6 @@ for rest_name, tab in zip(rests, tabs):
         df_resumen["ventas_estimadas"] = (df_resumen["conteo"] * df_resumen["precio_promedio"]).fillna(0)
         df_resumen = df_resumen.sort_values(["Clasificación", "conteo"], ascending=[True, False])
 
-        # Tabs por clasificación
         clasifs = df_resumen["Clasificación"].dropna().unique().tolist()
         clas_tabs = st.tabs(clasifs)
 
@@ -638,7 +570,7 @@ for rest_name, tab in zip(rests, tabs):
 
                 df_sub = (
                     df_resumen[df_resumen["Clasificación"] == clas]
-                    .drop(columns=["Clasificación"])  # no mostrar la clasificación
+                    .drop(columns=["Clasificación"])
                     .copy()
                 )
 
