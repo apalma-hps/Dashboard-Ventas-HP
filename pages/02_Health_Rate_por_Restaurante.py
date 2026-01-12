@@ -9,7 +9,7 @@ import re
 import unicodedata
 
 
-st.sidebar.caption(f"Última vista: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+
 
 # ============= CONFIG BÁSICA =============
 st.set_page_config(
@@ -23,7 +23,7 @@ st.sidebar.markdown("### Actualización")
 if st.sidebar.button("🔄 Actualizar data"):
     st.cache_data.clear()
     st.rerun()
-
+st.sidebar.caption(f"Última vista: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
 
 # ===== Tema de Altair =====
 def byf_altair_theme():
