@@ -5,7 +5,10 @@ import pandas as pd
 import streamlit as st
 import altair as alt
 from datetime import datetime, timedelta
-
+import re
+import unicodedata
+import json
+import urllib.request
 
 
 # ============= CONFIG BÁSICA =============
@@ -18,10 +21,11 @@ st.set_page_config(
 st.sidebar.markdown("### Actualización")
 
 if st.sidebar.button("🔄 Actualizar data"):
-    st.cache_data.clear()   # limpia caché de load_data / load_catalogo (y demás cache_data)
-    st.rerun()              # vuelve a ejecutar la app
+    st.cache_data.clear()
+    st.rerun()
 
 st.sidebar.caption(f"Última vista: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+
 
 # ===== Tema de Altair =====
 def byf_altair_theme():
@@ -44,8 +48,10 @@ def byf_altair_theme():
         }
     }
 
+
 alt.themes.register("byf_theme", byf_altair_theme)
 alt.themes.enable("byf_theme")
+
 
 # ===== Estilos =====
 st.markdown(
@@ -88,7 +94,7 @@ st.markdown(
         background: rgba(255, 255, 255, 0.95);
         border-radius: 16px;
         padding: 1.2rem 1.3rem;
-        box-shadow: 0 12px 30px rgba(15, 23, 42, 0.10);
+        box-shadow:0 12px 30px rgba(15, 23, 42, 0.10);
         border: 1px solid rgba(148, 163, 184, 0.3);
         margin-bottom: 1rem;
     }
@@ -104,6 +110,7 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
 
 # ===== Logo + título =====
 LOGO_URL = "https://raw.githubusercontent.com/apalma-hps/Dashboard-Ventas-HP/main/logo_hp.png"
@@ -138,36 +145,51 @@ with col_title:
 
 st.markdown("---")
 
+
 # =========================================================
 # URLs Y HELPERS
 # =========================================================
-DATA_URL= "https://docs.google.com/spreadsheets/d/e/2PACX-1vSLIeswEs8OILxZmVMwObbli0Zpbbqx7g7h6ZC5Fwm0PCjlZEFy66L9Xpha6ROW3loFCIRiWvEnLRHS/pub?output=csv"
-#DATA_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQZBL6mvIC1OUC-p0MREMW_7UvMKb8It4Y_ldFOi3FbqP4cwZBLrDXwpA_hjBzkeZz3tsOBqd9BlamY/pub?output=csv"
+DATA_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSLIeswEs8OILxZmVMwObbli0Zpbbqx7g7h6ZC5Fwm0PCjlZEFy66L9Xpha6ROW3loFCIRiWvEnLRHS/pub?output=csv"
+
+# Catálogo de conceptos (mismo que usas en Health Rate)
+CATALOGO_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQtKQGyCaerGAedhlpzaXlr-ycmm1t08a6lUtg-_3f7yWtJhLkQ6vn0TlI89l0FGVxOUy1Cwj5ykliB/pub?output=csv"
+
+# Apps Script (solo envío de correo). Mejor ponerlo en secrets aunque no sea secreto.
+APPSCRIPT_URL = st.secrets.get("APPSCRIPT_URL", "").strip()
+
 
 COL_CC = "Restaurante"
 COL_ESTADO = "Estado"
 COL_FECHA = "Fecha"
+COL_SUBTOT = "Subtotal"
 COL_TOTAL = "Total"
+COL_DESCUENTOS = "Descuentos"
 COL_TIPO = "Tipo"
 COL_FOLIO = "Folio"
 COL_VENTAS = "ventas_efectivas"
 
+# 👇 Esta columna es clave para el conteo (como en Health Rate)
+COL_DETALLE = "Detalle Items"
+
+
 def fmt_money(x):
     return "—" if (x is None or pd.isna(x)) else f"${x:,.0f}"
+
 
 def fmt_pct(x):
     return "—" if (x is None or pd.isna(x)) else f"{x * 100:,.1f}%"
 
+
 def fmt_pp(x):
-    # puntos porcentuales (pp) para cambios en proporciones
     return "—" if (x is None or pd.isna(x)) else f"{x * 100:+.1f}pp"
 
+
 def fmt_change_ratio(x):
-    # cambio porcentual: 0.12 => +12.0%
     if x is None or pd.isna(x):
         return "—"
     sign = "+" if x > 0 else ""
     return f"{sign}{x * 100:,.1f}%"
+
 
 def clean_money_series(s: pd.Series) -> pd.Series:
     if s is None:
@@ -178,23 +200,26 @@ def clean_money_series(s: pd.Series) -> pd.Series:
     s = s.str.replace(r"\s+", "", regex=True)
     return pd.to_numeric(s, errors="coerce")
 
+
 def is_delivery(val):
     try:
         return "delivery" in str(val).lower()
     except Exception:
         return False
 
+
 def to_monday(d: pd.Timestamp) -> pd.Timestamp:
     d = pd.to_datetime(d)
     return d - timedelta(days=d.weekday())
 
+
 def safe_pct_change(current, previous):
-    # (cur-prev)/prev con manejo de 0
     if previous is None or pd.isna(previous) or previous == 0:
         return None
     if current is None or pd.isna(current):
         return None
     return (current - previous) / previous
+
 
 def filtrar_periodo(df, inicio, fin, restaurante=None):
     mask = (df[COL_FECHA].dt.date >= inicio.date()) & (df[COL_FECHA].dt.date <= fin.date())
@@ -203,21 +228,194 @@ def filtrar_periodo(df, inicio, fin, restaurante=None):
         out = out[out[COL_CC] == restaurante]
     return out
 
-# =========================================================
-# MÉTRICAS + COLOR DELTAS (REEMPLAZA ESTAS FUNCIONES)
-# =========================================================
 
+def detect_tax_column(df_: pd.DataFrame) -> str | None:
+    candidates = ["Impuestos", "IVA", "Tax", "Taxes", "Impuesto", "VAT"]
+    for c in candidates:
+        if c in df_.columns:
+            return c
+    return None
+
+
+def get_void_mask(df_: pd.DataFrame, col_estado: str) -> pd.Series:
+    if col_estado in df_.columns:
+        return df_[col_estado].astype(str).str.strip().str.lower().eq("void")
+    return pd.Series(False, index=df_.index)
+
+
+# =========================================================
+# UPSSELL HELPERS (misma lógica del Health Rate)
+# =========================================================
+def norm_key(s: str) -> str:
+    if s is None:
+        return ""
+    s = str(s).strip().lower()
+    s = "".join(
+        c for c in unicodedata.normalize("NFKD", s)
+        if not unicodedata.combining(c)
+    )
+    s = re.sub(r"[^\w\s\/\-]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    s = re.sub(r"\-+", "-", s).strip()
+    return s
+
+
+def _parse_base_item(raw: str):
+    txt = str(raw or "").strip()
+    if not txt:
+        return "", 0
+
+    # quitar "( $123 )" si existe
+    txt = re.sub(r"\(\s*\$?\s*[\d\.,]+\s*\)", "", txt).strip()
+
+    qty = 1
+    m_qty = re.search(r"\s+[xX]\s*(\d+)\s*$", txt)
+    if m_qty:
+        qty = int(m_qty.group(1))
+        txt = txt[:m_qty.start()].strip()
+
+    nombre = txt.strip()
+    if not nombre:
+        return "", 0
+    return nombre, qty
+
+
+def parse_detalle_items_base_y_complementos(texto: str):
+    registros = []
+    if not isinstance(texto, str) or not texto.strip():
+        return registros
+
+    productos_principales = [p.strip() for p in texto.split("|") if p.strip()]
+
+    for producto in productos_principales:
+        if "[" in producto and "]" in producto:
+            partes = producto.split("[", 1)
+            base_texto = partes[0].strip()
+            complementos_texto = partes[1].split("]")[0].strip()
+        else:
+            base_texto = producto.strip()
+            complementos_texto = ""
+
+        nombre_base, qty_base = _parse_base_item(base_texto)
+        if nombre_base and qty_base > 0:
+            registros.append({
+                "item": nombre_base,
+                "qty": qty_base,
+                "tipo_concepto": "base",
+            })
+
+        if complementos_texto:
+            complementos = [c.strip() for c in complementos_texto.split(",") if c.strip()]
+            for comp in complementos:
+                comp_limpio = comp.lstrip("+").strip()
+                if comp_limpio:
+                    registros.append({
+                        "item": comp_limpio,
+                        "qty": 1,
+                        "tipo_concepto": "complemento",
+                    })
+
+    return registros
+
+
+@st.cache_data(ttl=600)
+def load_catalogo_conceptos() -> pd.DataFrame | None:
+    try:
+        cat = pd.read_csv(CATALOGO_URL)
+    except Exception as e:
+        st.warning(f"No se pudo cargar el catálogo: {e}")
+        return None
+
+    cat.columns = [c.strip() for c in cat.columns]
+    required = {"concepto", "tipo_concepto", "Categoria"}
+    if not required.issubset(set(cat.columns)):
+        st.warning("El catálogo debe tener columnas: concepto, tipo_concepto, Categoria.")
+        return None
+
+    cat["concepto"] = cat["concepto"].astype(str).str.strip()
+    cat["tipo_concepto"] = cat["tipo_concepto"].astype(str).str.strip().str.lower()
+    cat["Categoria_raw"] = cat["Categoria"].astype(str).str.strip()
+
+    is_instr = cat["Categoria_raw"].str.match(r"(?i)^\s*contar\s+")
+    m = cat["Categoria_raw"].str.extract(r"(?i)^\s*contar\s*(?:como\s+)?(.+?)\s*$")
+
+    cat["concepto_canonico"] = np.where(is_instr, m[0].str.strip(), cat["concepto"])
+    cat["Clasificación"] = np.where(is_instr, "REMAP", cat["Categoria_raw"])
+
+    cat["concepto_key"] = cat["concepto"].map(norm_key)
+
+    return cat
+
+
+def conteo_upsell(df_periodo: pd.DataFrame, catalogo: pd.DataFrame) -> pd.DataFrame:
+    """
+    Conteo real (unidades) de upsell en un periodo, basado en Detalle Items.
+    Upsell = tipo_concepto del catálogo en {"bebidas","bebida","complementos","complemento"}.
+    Excluye 'no contar' y 'REMAP'.
+    """
+    if df_periodo is None or df_periodo.empty:
+        return pd.DataFrame(columns=["concepto_canonico", "tipo_concepto", "unidades"])
+
+    if COL_DETALLE not in df_periodo.columns:
+        return pd.DataFrame(columns=["concepto_canonico", "tipo_concepto", "unidades"])
+
+    regs = []
+    # iterrows está bien aquí; volumen por semana suele ser manejable.
+    # Si luego quieres performance, lo vectorizamos.
+    for _, row in df_periodo.iterrows():
+        regs.extend(parse_detalle_items_base_y_complementos(row.get(COL_DETALLE, "")))
+
+    if not regs:
+        return pd.DataFrame(columns=["concepto_canonico", "tipo_concepto", "unidades"])
+
+    flat = pd.DataFrame(regs)
+    flat["item_key"] = flat["item"].map(norm_key)
+
+    j = flat.merge(
+        catalogo,
+        left_on="item_key",
+        right_on="concepto_key",
+        how="left",
+        suffixes=("", "_cat"),
+    )
+
+    # Solo mapeados
+    j = j[j["concepto"].notna()].copy()
+
+    j["Clasificación"] = j["Clasificación"].fillna("").astype(str).str.strip().str.lower()
+    j = j[j["Clasificación"] != "no contar"]
+    j = j[j["Clasificación"] != "remap"]
+    j = j[j["Clasificación"] != "remap "]  # por si viene con espacio raro
+
+    j["tipo_concepto"] = j["tipo_concepto"].fillna("").astype(str).str.strip().str.lower()
+    j = j[j["tipo_concepto"].isin(["bebidas", "bebida", "complementos", "complemento"])].copy()
+
+    j["concepto_canonico"] = j["concepto_canonico"].fillna(j["item"]).astype(str).str.strip()
+
+    out = (
+        j.groupby(["concepto_canonico", "tipo_concepto"], as_index=False)
+        .agg(unidades=("qty", "sum"))
+        .sort_values("unidades", ascending=False)
+    )
+    return out
+
+
+def post_json(url: str, payload: dict, timeout=20):
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+# =========================================================
+# MÉTRICAS
+# =========================================================
 def calcular_metricas(df_periodo: pd.DataFrame):
-    """
-    KPIs:
-    - ventas: suma ventas_efectivas (dinero)
-    - tickets: folios únicos donde ventas_efectivas > 0
-    - cancelados: folios únicos donde Estado=void
-    - ticket_promedio: ventas / tickets
-    - ventas_delivery: suma ventas_efectivas donde Tipo contiene delivery (dinero)
-    - pct_delivery: ventas_delivery / ventas  (dinero/dinero) ✅
-    - orders_per_day: tickets / días únicos (ENTERO) ✅
-    """
     if df_periodo is None or df_periodo.empty:
         return {
             "ventas": 0.0,
@@ -226,22 +424,21 @@ def calcular_metricas(df_periodo: pd.DataFrame):
             "ticket_promedio": 0.0,
             "ventas_delivery": 0.0,
             "pct_delivery": 0.0,
-            "orders_per_day": 0,  # ✅ entero
+            "orders_per_day": 0,
         }
+
+    is_void = get_void_mask(df_periodo, COL_ESTADO)
 
     ventas = float(df_periodo[COL_VENTAS].sum())
 
-    tickets_validos = df_periodo[df_periodo[COL_VENTAS] > 0]
-    tickets = int(tickets_validos[COL_FOLIO].nunique()) if COL_FOLIO in tickets_validos.columns else 0
+    # ✅ Tickets = folios NO VOID (no depende de ventas>0)
+    tickets = int(df_periodo.loc[~is_void, COL_FOLIO].nunique()) if COL_FOLIO in df_periodo.columns else 0
 
-    cancelados = 0
-    if (COL_ESTADO in df_periodo.columns) and (COL_FOLIO in df_periodo.columns):
-        estado_norm = df_periodo[COL_ESTADO].astype(str).str.strip().str.lower()
-        cancelados = int(df_periodo.loc[estado_norm.eq("void"), COL_FOLIO].nunique())
+    # ✅ Cancelados = folios VOID
+    cancelados = int(df_periodo.loc[is_void, COL_FOLIO].nunique()) if COL_FOLIO in df_periodo.columns else int(is_void.sum())
 
     ticket_promedio = float(ventas / tickets) if tickets > 0 else 0.0
 
-    # ✅ ventas_delivery en dinero (ventas_efectivas) para que %delivery sea dinero/dinero
     if COL_TIPO in df_periodo.columns:
         ventas_delivery = float(df_periodo.loc[df_periodo[COL_TIPO].map(is_delivery), COL_VENTAS].sum())
     else:
@@ -250,7 +447,7 @@ def calcular_metricas(df_periodo: pd.DataFrame):
     pct_delivery = float(ventas_delivery / ventas) if ventas > 0 else 0.0
 
     dias_unicos = int(df_periodo[COL_FECHA].dt.date.nunique())
-    orders_per_day = int(round(tickets / dias_unicos)) if dias_unicos > 0 else 0  # ✅ entero
+    orders_per_day = int(round(tickets / dias_unicos)) if dias_unicos > 0 else 0
 
     return {
         "ventas": ventas,
@@ -262,17 +459,8 @@ def calcular_metricas(df_periodo: pd.DataFrame):
         "orders_per_day": orders_per_day,
     }
 
-def delta_color(change, invert: bool = False):
-    """
-    Streamlit st.metric:
-    - normal  => positivo verde, negativo rojo
-    - inverse => positivo rojo, negativo verde
-    - off     => sin delta / sin base
 
-    Regla:
-    - invert=False para KPIs "buenos" (sube=verde)
-    - invert=True  para KPIs "malos"  (sube=rojo) -> Cancelados
-    """
+def delta_color(change, invert: bool = False):
     if change is None or pd.isna(change):
         return "off"
     return "inverse" if invert else "normal"
@@ -287,9 +475,9 @@ def load_data() -> pd.DataFrame:
     df_.columns = [c.strip() for c in df_.columns]
     return df_
 
+
 df = load_data()
 
-# Validaciones mínimas
 required_cols = {COL_CC, COL_FECHA, COL_TOTAL}
 missing = [c for c in required_cols if c not in df.columns]
 if missing:
@@ -297,22 +485,37 @@ if missing:
     st.stop()
 
 df[COL_FECHA] = pd.to_datetime(df[COL_FECHA], errors="coerce", dayfirst=True)
-df[COL_TOTAL] = clean_money_series(df[COL_TOTAL])
+df[COL_TOTAL] = clean_money_series(df[COL_TOTAL]).fillna(0.0)
 
-# Excluir void => ventas_efectivas=0
-if COL_ESTADO in df.columns:
-    estado_norm = df[COL_ESTADO].astype(str).str.strip().str.lower()
-    is_void = estado_norm.eq("void")
+if COL_SUBTOT not in df.columns:
+    st.warning("No existe 'Subtotal'. Se usará Subtotal = Total como fallback (puede afectar precisión).")
+    df[COL_SUBTOT] = df[COL_TOTAL]
 else:
-    is_void = pd.Series(False, index=df.index)
+    df[COL_SUBTOT] = clean_money_series(df[COL_SUBTOT]).fillna(0.0)
 
-df[COL_VENTAS] = np.where(is_void, 0.0, df[COL_TOTAL].fillna(0.0))
+if COL_DESCUENTOS in df.columns:
+    df[COL_DESCUENTOS] = clean_money_series(df[COL_DESCUENTOS]).fillna(0.0)
+else:
+    df[COL_DESCUENTOS] = 0.0
 
-# Filtrar fechas válidas
+tax_col = detect_tax_column(df)
+if tax_col is not None:
+    df["_impuestos"] = clean_money_series(df[tax_col]).fillna(0.0)
+else:
+    df["_impuestos"] = (df[COL_TOTAL] - df[COL_SUBTOT]).clip(lower=0.0)
+
+is_void = get_void_mask(df, COL_ESTADO)
+
+df["_calc_sti_d"] = (df[COL_SUBTOT] + df["_impuestos"] - df[COL_DESCUENTOS]).fillna(0.0)
+df["_ventas_brutas_regla"] = np.where(df["_calc_sti_d"] > df[COL_TOTAL], df[COL_TOTAL], df["_calc_sti_d"])
+
+df[COL_VENTAS] = np.where(is_void, 0.0, pd.Series(df["_ventas_brutas_regla"], index=df.index).clip(lower=0.0))
+
 df = df[df[COL_FECHA].notna()].copy()
 if df.empty:
     st.info("No hay datos con fecha válida.")
     st.stop()
+
 
 # =========================================================
 # FILTROS
@@ -335,24 +538,22 @@ st.sidebar.markdown("---")
 restaurantes = ["Todos los restaurantes"] + sorted(df[COL_CC].dropna().unique().tolist())
 rest_seleccionado = st.sidebar.selectbox("Restaurante", restaurantes, index=0)
 
+
 # =========================================================
 # PERIODOS
 # =========================================================
-# Semana actual (seleccionada)
 semana_actual_inicio = inicio_semana_sel
 semana_actual_fin = semana_actual_inicio + timedelta(days=6)
 
-# Semana anterior
 semana_anterior_inicio = semana_actual_inicio - timedelta(days=7)
 semana_anterior_fin = semana_anterior_inicio + timedelta(days=6)
 
-# 4 semanas actuales: 28 días terminando en el domingo de la semana seleccionada
-cuatro_sem_actual_inicio = semana_actual_inicio - timedelta(days=21)  # lunes de 3 semanas antes
+cuatro_sem_actual_inicio = semana_actual_inicio - timedelta(days=21)
 cuatro_sem_actual_fin = semana_actual_fin
 
-# 4 semanas anteriores: 28 días previos al inicio de las 4 semanas actuales
 cuatro_sem_anterior_inicio = cuatro_sem_actual_inicio - timedelta(days=28)
 cuatro_sem_anterior_fin = cuatro_sem_actual_inicio - timedelta(days=1)
+
 
 # =========================================================
 # DATA POR PERIODO
@@ -366,6 +567,7 @@ metricas_sem_actual = calcular_metricas(df_sem_actual)
 metricas_sem_anterior = calcular_metricas(df_sem_anterior)
 metricas_4sem_actual = calcular_metricas(df_4sem_actual)
 metricas_4sem_anterior = calcular_metricas(df_4sem_anterior)
+
 
 # =========================================================
 # HEADER: INFO DE PERIODOS
@@ -407,8 +609,9 @@ with c2:
 
 st.markdown("---")
 
+
 # =========================================================
-# KPIs WoW (REEMPLAZA TU BLOQUE COMPLETO)
+# KPIs WoW
 # =========================================================
 st.markdown("### Week over Week (WoW)")
 
@@ -418,7 +621,6 @@ cambio_ticket_prom_wow = safe_pct_change(metricas_sem_actual["ticket_promedio"],
 cambio_orders_day_wow = safe_pct_change(metricas_sem_actual["orders_per_day"], metricas_sem_anterior["orders_per_day"])
 cambio_cancelados_wow = safe_pct_change(metricas_sem_actual["cancelados"], metricas_sem_anterior["cancelados"])
 
-# Delivery:
 cambio_ventas_delivery_wow = safe_pct_change(metricas_sem_actual["ventas_delivery"], metricas_sem_anterior["ventas_delivery"])
 cambio_pct_delivery_wow_pp = (metricas_sem_actual["pct_delivery"] - metricas_sem_anterior["pct_delivery"])
 
@@ -445,7 +647,7 @@ with col3:
         "Cancelados",
         f"{metricas_sem_actual['cancelados']:,.0f}",
         delta=f"{fmt_change_ratio(cambio_cancelados_wow)} vs sem. anterior",
-        delta_color=delta_color(cambio_cancelados_wow, invert=True),  # ✅ al revés
+        delta_color=delta_color(cambio_cancelados_wow, invert=True),
     )
 
 with col4:
@@ -459,7 +661,7 @@ with col4:
 with col5:
     st.metric(
         "Órdenes / día",
-        f"{metricas_sem_actual['orders_per_day']:,.0f}",  # ✅ entero
+        f"{metricas_sem_actual['orders_per_day']:,.0f}",
         delta=f"{fmt_change_ratio(cambio_orders_day_wow)} vs sem. anterior",
         delta_color=delta_color(cambio_orders_day_wow, invert=False),
     )
@@ -469,9 +671,8 @@ with col6:
         "% Delivery",
         fmt_pct(metricas_sem_actual["pct_delivery"]),
         delta=f"{fmt_pp(cambio_pct_delivery_wow_pp)} vs sem. anterior",
-        delta_color=delta_color(cambio_pct_delivery_wow_pp, invert=False),  # ✅ ya no gris
+        delta_color=delta_color(cambio_pct_delivery_wow_pp, invert=False),
     )
-
 
 st.markdown("#### Comparativa Detallada WoW")
 wow_data = pd.DataFrame({
@@ -481,7 +682,7 @@ wow_data = pd.DataFrame({
         f"{metricas_sem_anterior['tickets']:,.0f}",
         f"{metricas_sem_anterior['cancelados']:,.0f}",
         fmt_money(metricas_sem_anterior["ticket_promedio"]),
-        f"{metricas_sem_anterior['orders_per_day']:,.0f}",  # ✅ entero
+        f"{metricas_sem_anterior['orders_per_day']:,.0f}",
         fmt_money(metricas_sem_anterior["ventas_delivery"]),
         fmt_pct(metricas_sem_anterior["pct_delivery"]),
     ],
@@ -490,7 +691,7 @@ wow_data = pd.DataFrame({
         f"{metricas_sem_actual['tickets']:,.0f}",
         f"{metricas_sem_actual['cancelados']:,.0f}",
         fmt_money(metricas_sem_actual["ticket_promedio"]),
-        f"{metricas_sem_actual['orders_per_day']:,.0f}",  # ✅ entero
+        f"{metricas_sem_actual['orders_per_day']:,.0f}",
         fmt_money(metricas_sem_actual["ventas_delivery"]),
         fmt_pct(metricas_sem_actual["pct_delivery"]),
     ],
@@ -510,7 +711,7 @@ st.markdown("---")
 
 
 # =========================================================
-# KPIs 4WoW (REEMPLAZA TU BLOQUE COMPLETO)
+# KPIs 4WoW
 # =========================================================
 st.markdown("### 4 Weeks vs 4 Weeks (4WoW)")
 
@@ -519,7 +720,6 @@ cambio_tickets_4wow = safe_pct_change(metricas_4sem_actual["tickets"], metricas_
 cambio_ticket_prom_4wow = safe_pct_change(metricas_4sem_actual["ticket_promedio"], metricas_4sem_anterior["ticket_promedio"])
 cambio_orders_day_4wow = safe_pct_change(metricas_4sem_actual["orders_per_day"], metricas_4sem_anterior["orders_per_day"])
 
-# Delivery:
 cambio_ventas_delivery_4wow = safe_pct_change(metricas_4sem_actual["ventas_delivery"], metricas_4sem_anterior["ventas_delivery"])
 cambio_pct_delivery_4wow_pp = (metricas_4sem_actual["pct_delivery"] - metricas_4sem_anterior["pct_delivery"])
 
@@ -552,7 +752,7 @@ with col3:
 with col4:
     st.metric(
         "Órdenes / día",
-        f"{metricas_4sem_actual['orders_per_day']:,.0f}",  # ✅ entero
+        f"{metricas_4sem_actual['orders_per_day']:,.0f}",
         delta=f"{fmt_change_ratio(cambio_orders_day_4wow)} vs 4 sem. anteriores",
         delta_color=delta_color(cambio_orders_day_4wow, invert=False),
     )
@@ -562,7 +762,7 @@ with col5:
         "% Delivery",
         fmt_pct(metricas_4sem_actual["pct_delivery"]),
         delta=f"{fmt_pp(cambio_pct_delivery_4wow_pp)} vs 4 sem. anteriores",
-        delta_color=delta_color(cambio_pct_delivery_4wow_pp, invert=False),  # ✅ ya no gris
+        delta_color=delta_color(cambio_pct_delivery_4wow_pp, invert=False),
     )
 
 st.markdown("#### Comparativa Detallada 4WoW")
@@ -572,7 +772,7 @@ four_wow_data = pd.DataFrame({
         fmt_money(metricas_4sem_anterior["ventas"]),
         f"{metricas_4sem_anterior['tickets']:,.0f}",
         fmt_money(metricas_4sem_anterior["ticket_promedio"]),
-        f"{metricas_4sem_anterior['orders_per_day']:,.0f}",  # ✅ entero
+        f"{metricas_4sem_anterior['orders_per_day']:,.0f}",
         fmt_money(metricas_4sem_anterior["ventas_delivery"]),
         fmt_pct(metricas_4sem_anterior["pct_delivery"]),
     ],
@@ -580,7 +780,7 @@ four_wow_data = pd.DataFrame({
         fmt_money(metricas_4sem_actual["ventas"]),
         f"{metricas_4sem_actual['tickets']:,.0f}",
         fmt_money(metricas_4sem_actual["ticket_promedio"]),
-        f"{metricas_4sem_actual['orders_per_day']:,.0f}",  # ✅ entero
+        f"{metricas_4sem_actual['orders_per_day']:,.0f}",
         fmt_money(metricas_4sem_actual["ventas_delivery"]),
         fmt_pct(metricas_4sem_actual["pct_delivery"]),
     ],
@@ -596,41 +796,7 @@ four_wow_data = pd.DataFrame({
 st.dataframe(four_wow_data.set_index("Métrica"), use_container_width=True)
 
 st.markdown("---")
-# =========================================================
-# TENDENCIA SEMANAL (últimas 8 semanas desde semana seleccionada)
-# =========================================================
-st.markdown("### Tendencia de Ventas Semanales (últimas 8 semanas)")
 
-fecha_8_semanas_atras = semana_actual_inicio - timedelta(days=7 * 7)  # 7 semanas antes
-df_ultimas_8_sem = df[(df[COL_FECHA] >= fecha_8_semanas_atras) & (df[COL_FECHA] <= semana_actual_fin)].copy()
-
-if rest_seleccionado != "Todos los restaurantes":
-    df_ultimas_8_sem = df_ultimas_8_sem[df_ultimas_8_sem[COL_CC] == rest_seleccionado]
-
-if df_ultimas_8_sem.empty:
-    st.info("No hay datos suficientes para mostrar la tendencia semanal.")
-else:
-    df_ultimas_8_sem["semana"] = df_ultimas_8_sem[COL_FECHA].apply(lambda x: to_monday(x))
-    ventas_semanales = (
-        df_ultimas_8_sem.groupby("semana", as_index=False)[COL_VENTAS]
-        .sum()
-        .sort_values("semana")
-    )
-
-    chart = (
-        alt.Chart(ventas_semanales)
-        .mark_line(point=True, strokeWidth=3)
-        .encode(
-            x=alt.X("semana:T", title="Semana (inicio)"),
-            y=alt.Y(f"{COL_VENTAS}:Q", title="Ventas"),
-            tooltip=[
-                alt.Tooltip("semana:T", title="Semana", format="%d/%m/%Y"),
-                alt.Tooltip(f"{COL_VENTAS}:Q", title="Ventas", format="$,.0f"),
-            ],
-        )
-        .properties(height=300)
-    )
-    st.altair_chart(chart, use_container_width=True)
 
 # =========================================================
 # COMPARATIVAS POR RESTAURANTE (si "Todos")
@@ -645,7 +811,6 @@ if rest_seleccionado == "Todos los restaurantes":
     comparativa_4wow = []
 
     for rest in restaurantes_lista:
-        # WoW
         df_rest_actual = filtrar_periodo(df, semana_actual_inicio, semana_actual_fin, rest)
         df_rest_anterior = filtrar_periodo(df, semana_anterior_inicio, semana_anterior_fin, rest)
 
@@ -672,7 +837,6 @@ if rest_seleccionado == "Todos los restaurantes":
         }
         comparativa_wow.append(wow)
 
-        # 4WoW
         df_rest_4act = filtrar_periodo(df, cuatro_sem_actual_inicio, cuatro_sem_actual_fin, rest)
         df_rest_4ant = filtrar_periodo(df, cuatro_sem_anterior_inicio, cuatro_sem_anterior_fin, rest)
 
@@ -702,7 +866,6 @@ if rest_seleccionado == "Todos los restaurantes":
     df_comp_wow = pd.DataFrame(comparativa_wow)
     df_comp_4wow = pd.DataFrame(comparativa_4wow)
 
-    # Ordenar por ventas actuales (WoW) desc
     df_comp_wow = df_comp_wow.sort_values("Ventas (Actual)", ascending=False)
 
     st.markdown("#### WoW por Restaurante")
@@ -739,23 +902,6 @@ if rest_seleccionado == "Todos los restaurantes":
         }),
         use_container_width=True,
     )
-
-    # Mini chart: cambio ventas % WoW
-    st.markdown("#### Cambios % de Ventas (WoW) · ranking")
-    df_chart = df_comp_wow[["Restaurante", "Cambio Ventas %"]].copy()
-    df_chart["Cambio Ventas %"] = df_chart["Cambio Ventas %"].fillna(0.0)
-
-    ch_bar = (
-        alt.Chart(df_chart)
-        .mark_bar()
-        .encode(
-            x=alt.X("Cambio Ventas %:Q", title="Cambio % Ventas (WoW)", axis=alt.Axis(format="%")),
-            y=alt.Y("Restaurante:N", sort="-x", title=""),
-            tooltip=[alt.Tooltip("Restaurante:N"), alt.Tooltip("Cambio Ventas %:Q", format=".1%")],
-        )
-        .properties(height=min(700, 24 * max(8, len(df_chart))))
-    )
-    st.altair_chart(ch_bar, use_container_width=True)
 
     st.markdown("---")
     df_comp_4wow = df_comp_4wow.sort_values("Ventas (4Act)", ascending=False)
@@ -795,19 +941,137 @@ if rest_seleccionado == "Todos los restaurantes":
         use_container_width=True,
     )
 
-    st.markdown("#### Cambios % de Ventas (4WoW) · ranking")
-    df_chart2 = df_comp_4wow[["Restaurante", "Cambio Ventas %"]].copy()
-    df_chart2["Cambio Ventas %"] = df_chart2["Cambio Ventas %"].fillna(0.0)
 
-    ch_bar2 = (
-        alt.Chart(df_chart2)
-        .mark_bar()
-        .encode(
-            x=alt.X("Cambio Ventas %:Q", title="Cambio % Ventas (4WoW)", axis=alt.Axis(format="%")),
-            y=alt.Y("Restaurante:N", sort="-x", title=""),
-            tooltip=[alt.Tooltip("Restaurante:N"), alt.Tooltip("Cambio Ventas %:Q", format=".1%")],
+# =========================================================
+# NUEVO: OPORTUNIDAD UPSELL + EMAIL (Apps Script solo envía)
+# =========================================================
+st.markdown("---")
+st.markdown("## Oportunidad Upsell (bebidas + complementos)")
+
+# Cargar catálogo
+catalogo = load_catalogo_conceptos()
+if catalogo is None:
+    st.warning("No se pudo cargar el catálogo, por lo que no se puede calcular upsell.")
+else:
+    # Validar que exista Detalle Items
+    if COL_DETALLE not in df.columns:
+        st.warning(
+            f"No existe la columna '{COL_DETALLE}' en tu CSV. "
+            "Sin esa columna no se puede calcular upsell (no hay conceptos por pedido)."
         )
-        .properties(height=min(700, 24 * max(8, len(df_chart2))))
-    )
-    st.altair_chart(ch_bar2, use_container_width=True)
+    else:
+        # Conteos reales por periodo (SEM ACT y 4 SEM ACT)
+        ups_sem = conteo_upsell(df_sem_actual, catalogo)
+        ups_4 = conteo_upsell(df_4sem_actual, catalogo)
 
+        unidades_sem = float(ups_sem["unidades"].sum()) if not ups_sem.empty else 0.0
+        unidades_4 = float(ups_4["unidades"].sum()) if not ups_4.empty else 0.0
+
+        tickets_sem = float(metricas_sem_actual["tickets"])
+        tickets_4 = float(metricas_4sem_actual["tickets"])
+
+        attach_real_sem = (unidades_sem / tickets_sem) if tickets_sem > 0 else 0.0
+        attach_real_4 = (unidades_4 / tickets_4) if tickets_4 > 0 else 0.0
+
+        cA, cB, cC = st.columns([1.2, 1.0, 2.8])
+        with cA:
+            attach_meta = st.number_input(
+                "Meta attach rate upsell (%)",
+                min_value=0.0, max_value=100.0,
+                value=12.0, step=1.0,
+                help="Interpretación: unidades upsell (bebidas+complementos) por ticket.",
+            ) / 100.0
+
+        with cB:
+            top_n = st.number_input(
+                "Top N",
+                min_value=3, max_value=30, value=10, step=1,
+                help="Cuántos conceptos mostrar en el top.",
+            )
+
+        with cC:
+            mensaje_meta = st.text_area(
+                "Texto / meta (se incluye en el correo)",
+                value="Meta: elevar attach de bebidas+complementos con sugerencia activa en caja y combos.",
+                height=90,
+            )
+
+        # GAP vs meta (unidades)
+        unidades_meta_sem = tickets_sem * attach_meta
+        gap_unidades_sem = max(unidades_meta_sem - unidades_sem, 0.0)
+
+        unidades_meta_4 = tickets_4 * attach_meta
+        gap_unidades_4 = max(unidades_meta_4 - unidades_4, 0.0)
+
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Unidades upsell (Semana)", f"{unidades_sem:,.0f}")
+        k2.metric("Attach real (Semana)", fmt_pct(attach_real_sem))
+        k3.metric("Gap unidades (Semana)", f"{gap_unidades_sem:,.0f}")
+        k4.metric("Meta attach", fmt_pct(attach_meta))
+
+        kk1, kk2, kk3, kk4 = st.columns(4)
+        kk1.metric("Unidades upsell (4 Sem)", f"{unidades_4:,.0f}")
+        kk2.metric("Attach real (4 Sem)", fmt_pct(attach_real_4))
+        kk3.metric("Gap unidades (4 Sem)", f"{gap_unidades_4:,.0f}")
+        kk4.metric("Tickets (Semana)", f"{int(tickets_sem):,}")
+
+        # Tablas top
+        st.markdown("#### Top upsells por unidades (real)")
+        t1, t2 = st.columns(2)
+        with t1:
+            st.markdown("**Semana actual**")
+            if ups_sem.empty:
+                st.info("No se detectaron upsells mapeados en la semana actual.")
+            else:
+                st.dataframe(ups_sem.head(int(top_n)), use_container_width=True)
+
+        with t2:
+            st.markdown("**4 semanas actuales**")
+            if ups_4.empty:
+                st.info("No se detectaron upsells mapeados en las 4 semanas actuales.")
+            else:
+                st.dataframe(ups_4.head(int(top_n)), use_container_width=True)
+
+        # Correo via Apps Script (solo envío)
+        st.markdown("---")
+        st.markdown("## Enviar correo")
+
+        if not APPSCRIPT_URL:
+            st.info("Configura `APPSCRIPT_URL` en `.streamlit/secrets.toml` para habilitar el envío.")
+        else:
+            # Vista previa del correo (lo que mandaremos)
+            payload = {
+                "restaurante": rest_seleccionado,
+                "periodos": {
+                    "semana_actual": f"{semana_actual_inicio.strftime('%d/%m/%Y')} - {semana_actual_fin.strftime('%d/%m/%Y')}",
+                    "cuatro_sem_actual": f"{cuatro_sem_actual_inicio.strftime('%d/%m/%Y')} - {cuatro_sem_actual_fin.strftime('%d/%m/%Y')}",
+                },
+                "meta": {
+                    "attach_meta": float(attach_meta),
+                    "mensaje": mensaje_meta,
+                },
+                "resultados": {
+                    "tickets_sem": int(tickets_sem),
+                    "unidades_sem": float(unidades_sem),
+                    "attach_real_sem": float(attach_real_sem),
+                    "gap_unidades_sem": float(gap_unidades_sem),
+
+                    "tickets_4": int(tickets_4),
+                    "unidades_4": float(unidades_4),
+                    "attach_real_4": float(attach_real_4),
+                    "gap_unidades_4": float(gap_unidades_4),
+                },
+                "top_sem": ups_sem.head(int(top_n)).to_dict(orient="records") if not ups_sem.empty else [],
+                "top_4": ups_4.head(int(top_n)).to_dict(orient="records") if not ups_4.empty else [],
+            }
+
+
+            if st.button("📩 Enviar reporte"):
+                try:
+                    resp = post_json(APPSCRIPT_URL, payload)
+                    if resp.get("ok"):
+                        st.success(f"Correo enviado a: {resp.get('to', '—')}")
+                    else:
+                        st.error(f"Apps Script error: {resp.get('error')}")
+                except Exception as e:
+                    st.error(f"No se pudo contactar Apps Script: {e}")
