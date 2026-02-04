@@ -8,9 +8,6 @@ from datetime import datetime
 import re
 import unicodedata
 
-
-
-
 # ============= CONFIG BÁSICA =============
 st.set_page_config(
     page_title="Health Rate por Restaurante – Marcas HP",
@@ -24,6 +21,7 @@ if st.sidebar.button("🔄 Actualizar data"):
     st.cache_data.clear()
     st.rerun()
 st.sidebar.caption(f"Última vista: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+
 
 # ===== Tema de Altair =====
 def byf_altair_theme():
@@ -199,9 +197,15 @@ def get_void_mask(df_: pd.DataFrame, col_estado: str) -> pd.Series:
 
 
 # =========================================================
-# Parser (base + complementos) - MEJORADO
+# Parser (base + complementos) - CORREGIDO
 # =========================================================
 def _parse_base_item(raw: str):
+    """
+    Parsea un item base extrayendo: nombre, cantidad y precio unitario.
+
+    IMPORTANTE: Cantidades decimales menores a 1 (como x0.5 por descuentos)
+    se redondean a 1 para efectos de conteo.
+    """
     txt = raw.strip()
     if not txt:
         return "", 0, None
@@ -217,9 +221,19 @@ def _parse_base_item(raw: str):
         txt = txt[:m_precio.start()].strip()
 
     qty = 1
-    m_qty = re.search(r"\s+[xX]\s*(\d+)\s*$", txt)
+    # Detectar cantidades decimales también (x0.5, x1.5, etc)
+    m_qty = re.search(r"\s+[xX]\s*([\d\.]+)\s*$", txt)
     if m_qty:
-        qty = int(m_qty.group(1))
+        try:
+            qty_float = float(m_qty.group(1))
+            # ✅ Si la cantidad es menor a 1, contarla como 1
+            # Esto maneja casos como x0.5 causados por descuentos
+            if qty_float < 1:
+                qty = 1
+            else:
+                qty = int(round(qty_float))
+        except ValueError:
+            qty = 1
         txt = txt[:m_qty.start()].strip()
 
     nombre = txt.strip()
@@ -234,6 +248,17 @@ def _parse_base_item(raw: str):
 
 
 def parse_detalle_items_base_y_complementos(texto: str):
+    """
+    Parser mejorado que multiplica los complementos por la cantidad del producto base.
+
+    Ejemplo:
+        "Burrito Chilangazo x4 ($596.00) [+Salsa Verde, +Limones]"
+
+    Retorna:
+        - 4 x Burrito Chilangazo (base)
+        - 4 x Salsa Verde (complemento)
+        - 4 x Limones (complemento)
+    """
     registros = []
     if not isinstance(texto, str) or not texto.strip():
         return registros
@@ -251,7 +276,11 @@ def parse_detalle_items_base_y_complementos(texto: str):
 
         nombre_base, qty_base, precio_unit = _parse_base_item(base_texto)
 
-        if nombre_base and qty_base > 0:
+        # Asegurar que qty_base sea al menos 1 para evitar problemas
+        if qty_base <= 0:
+            qty_base = 1
+
+        if nombre_base:
             registros.append({
                 "item": nombre_base,
                 "qty": qty_base,
@@ -259,6 +288,7 @@ def parse_detalle_items_base_y_complementos(texto: str):
                 "tipo_concepto": "base",
             })
 
+        # ✅ CORRECCIÓN: Los complementos ahora heredan qty_base
         if complementos_texto:
             complementos = [c.strip() for c in complementos_texto.split(",") if c.strip()]
 
@@ -267,7 +297,7 @@ def parse_detalle_items_base_y_complementos(texto: str):
                 if comp_limpio:
                     registros.append({
                         "item": comp_limpio,
-                        "qty": 1,
+                        "qty": qty_base,  # ✅ Ahora usa la cantidad del producto base
                         "precio_unitario": None,
                         "tipo_concepto": "complemento",
                     })
@@ -303,11 +333,17 @@ def load_catalogo() -> pd.DataFrame | None:
     cat["tipo_concepto"] = cat["tipo_concepto"].astype(str).str.strip().str.lower()
     cat["Categoria_raw"] = cat["Categoria"].astype(str).str.strip()
 
+    # Detectar instrucciones "Contar como..."
     is_instr = cat["Categoria_raw"].str.match(r"(?i)^\s*contar\s+")
     m = cat["Categoria_raw"].str.extract(r"(?i)^\s*contar\s*(?:como\s+)?(.+?)\s*$")
 
+    # concepto_canonico: el nombre al que se debe mapear
     cat["concepto_canonico"] = np.where(is_instr, m[0].str.strip(), cat["concepto"])
-    cat["Clasificación"] = np.where(is_instr, "REMAP", cat["Categoria_raw"])
+
+    # Clasificación: mantener la categoría original si no es "Contar como"
+    # Si es "Contar como", necesitamos buscar la clasificación del concepto canónico
+    cat["Clasificación"] = cat["Categoria_raw"]
+    cat["es_remap"] = is_instr
 
     cat["concepto_key"] = cat["concepto"].map(norm_key)
     cat["canon_key"] = cat["concepto_canonico"].map(norm_key)
@@ -442,7 +478,8 @@ for rest_name, tab in zip(rests, tabs):
             tot_del = float(data_rest.loc[data_rest[COL_TIPO].map(is_delivery), COL_VENTAS].sum())
             aport_delivery = tot_del / ventas_total
 
-        n_void = int(data_rest.loc[is_void_r, COL_FOLIO].nunique()) if COL_FOLIO in data_rest.columns else int(is_void_r.sum())
+        n_void = int(data_rest.loc[is_void_r, COL_FOLIO].nunique()) if COL_FOLIO in data_rest.columns else int(
+            is_void_r.sum())
 
         kpi_rows = [
             {"KPI": "Ventas Totales (netas)", "Valor": fmt_money(ventas_total)},
@@ -450,7 +487,8 @@ for rest_name, tab in zip(rests, tabs):
             {"KPI": "Tickets (No Void)", "Valor": f"{n_tickets:,}"},
             {"KPI": "Tickets Cancelados (Void)", "Valor": f"{n_void:,}"},
             {"KPI": "Ticket Promedio", "Valor": fmt_money(ticket_prom) if ticket_prom is not None else "—"},
-            {"KPI": "Promedio Diario de Ventas", "Valor": fmt_money(prom_diario_ventas) if prom_diario_ventas is not None else "—"},
+            {"KPI": "Promedio Diario de Ventas",
+             "Valor": fmt_money(prom_diario_ventas) if prom_diario_ventas is not None else "—"},
             {"KPI": "Aportación Delivery", "Valor": fmt_pct(aport_delivery) if aport_delivery is not None else "—"},
         ]
         st.dataframe(pd.DataFrame(kpi_rows).set_index("KPI"), use_container_width=True)
@@ -464,19 +502,36 @@ for rest_name, tab in zip(rests, tabs):
         )
 
         st.markdown("#### Ventas en el tiempo")
+
+        serie = serie.sort_values("periodo").copy()
+
+        # Etiqueta legible según granularidad
+        if granularidad == "Día":
+            serie["periodo_str"] = pd.to_datetime(serie["periodo"]).dt.strftime("%d %b %Y")
+        elif granularidad == "Semana":
+            # semana iniciando lunes (ya lo haces con W-MON), mostramos inicio
+            serie["periodo_str"] = pd.to_datetime(serie["periodo"]).dt.strftime("Sem %d %b %Y")
+        else:  # Mes
+            serie["periodo_str"] = pd.to_datetime(serie["periodo"]).dt.strftime("%b %Y")
+
+        # Orden cronológico real del eje X (aunque sea string)
+        orden_periodos = serie[["periodo", "periodo_str"]].drop_duplicates().sort_values("periodo")[
+            "periodo_str"].tolist()
+
         ch = (
             alt.Chart(serie)
-            .mark_line(point=True)
+            .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
             .encode(
-                x=alt.X("periodo:T", title=granularidad),
-                y=alt.Y(f"{COL_VENTAS}:Q", title="Ventas"),
+                x=alt.X("periodo_str:N", title=granularidad, sort=orden_periodos),
+                y=alt.Y(f"{COL_VENTAS}:Q", title="Ventas", scale=alt.Scale(zero=True)),
                 tooltip=[
-                    alt.Tooltip("periodo:T", title=granularidad),
-                    alt.Tooltip(f"{COL_VENTAS}:Q", title="Ventas", format=","),
+                    alt.Tooltip("periodo_str:N", title=granularidad),
+                    alt.Tooltip(f"{COL_VENTAS}:Q", title="Ventas", format=",.0f"),
                 ],
             )
-            .properties(height=280)
+            .properties(height=300)
         )
+
         st.altair_chart(ch, use_container_width=True)
 
         # =========================================================
@@ -527,11 +582,36 @@ for rest_name, tab in zip(rests, tabs):
             suffixes=("", "_cat"),
         )
 
+        # Usar concepto_canonico como nombre final del item
         df_join["item_canonico"] = df_join["concepto_canonico"].fillna(df_join["item"]).astype(str).str.strip()
-        df_join["Clasificación"] = df_join["Clasificación"].fillna("Sin clasificación").astype(str).str.strip()
 
-        df_join = df_join[df_join["Clasificación"].str.strip().str.lower() != "no contar"]
-        df_join = df_join[df_join["Clasificación"] != "REMAP"]
+        # Para items con REMAP, necesitamos buscar la clasificación del concepto canónico
+        # Crear un diccionario de concepto_canonico -> Clasificación
+        if "es_remap" in catalogo.columns:
+            # Obtener la clasificación de los conceptos base (no REMAP)
+            clasificacion_map = (
+                catalogo[~catalogo["es_remap"]]
+                [["concepto", "Categoria_raw"]]
+                .drop_duplicates()
+                .set_index("concepto")["Categoria_raw"]
+                .to_dict()
+            )
+
+            # Aplicar: si es REMAP, buscar la clasificación del concepto canónico
+            df_join["Clasificación_final"] = df_join.apply(
+                lambda row: clasificacion_map.get(row["concepto_canonico"], row["Clasificación"])
+                if pd.notna(row.get("es_remap")) and row.get("es_remap")
+                else row["Clasificación"],
+                axis=1
+            )
+        else:
+            df_join["Clasificación_final"] = df_join["Clasificación"]
+
+        df_join["Clasificación_final"] = df_join["Clasificación_final"].fillna("Sin clasificación").astype(
+            str).str.strip()
+
+        # Filtrar solo "no contar"
+        df_join = df_join[df_join["Clasificación_final"].str.strip().str.lower() != "no contar"]
 
         no_mapeados = (
             df_join[df_join["concepto"].isna()][["item", "item_key", "tipo_concepto"]]
@@ -550,12 +630,12 @@ for rest_name, tab in zip(rests, tabs):
 
         df_resumen = (
             df_join
-            .groupby(["Clasificación", "item_canonico"], as_index=False)
+            .groupby(["Clasificación_final", "item_canonico"], as_index=False)
             .agg(
                 conteo=("qty", "sum"),
                 precio_promedio=("precio_unitario_base", "mean"),
             )
-            .rename(columns={"item_canonico": "item"})
+            .rename(columns={"item_canonico": "item", "Clasificación_final": "Clasificación"})
         )
 
         df_resumen["ventas_estimadas"] = (df_resumen["conteo"] * df_resumen["precio_promedio"]).fillna(0)
