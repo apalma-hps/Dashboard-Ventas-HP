@@ -397,24 +397,39 @@ else:
     )
 
     st.markdown("#### Ventas Mensuales por Marca")
+
+    # Orden temporal
+    df_rest_mes_global = df_rest_mes_global.sort_values("mes").copy()
+
+    # Mes como etiqueta discreta para barras (más legible)
+    df_rest_mes_global["mes_str"] = pd.to_datetime(df_rest_mes_global["mes"]).dt.strftime("%b %Y")
+
+    # Orden cronológico real para el eje X (aunque sea string)
+    orden_meses = (
+        df_rest_mes_global[["mes", "mes_str"]]
+        .drop_duplicates()
+        .sort_values("mes")["mes_str"]
+        .tolist()
+    )
+
     ch_global_rest = (
         alt.Chart(df_rest_mes_global)
-        .mark_line(point=True)
+        .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
         .encode(
-            x=alt.X("mes:T", title="Mes"),
+            x=alt.X("mes_str:N", title="Mes", sort=orden_meses),
+            xOffset=alt.XOffset(f"{COL_CC}:N"),  # ✅ agrupado por restaurante
             y=alt.Y(f"{COL_VENTAS}:Q", title="Ventas netas"),
             color=alt.Color(f"{COL_CC}:N", title="Restaurante"),
             tooltip=[
-                alt.Tooltip("mes:T", title="Mes"),
+                alt.Tooltip("mes_str:N", title="Mes"),
                 alt.Tooltip(f"{COL_CC}:N", title="Restaurante"),
-                alt.Tooltip(f"{COL_VENTAS}:Q", title="Ventas", format=","),
+                alt.Tooltip(f"{COL_VENTAS}:Q", title="Ventas", format=",.0f"),
             ],
         )
-        .properties(height=280)
+        .properties(height=340)
     )
-    st.altair_chart(ch_global_rest, use_container_width=True)
 
-st.markdown("---")
+    st.altair_chart(ch_global_rest, use_container_width=True)
 
 # =====================================================
 # TABLA: TICKET PROMEDIO POR RESTAURANTE (GLOBAL)
