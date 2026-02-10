@@ -5,8 +5,6 @@ import pandas as pd
 import streamlit as st
 import altair as alt
 from datetime import datetime
-import re
-import unicodedata
 
 # ============= CONFIG BÁSICA =============
 st.set_page_config(
@@ -110,7 +108,7 @@ with col_title:
         """
         <h1 style="margin-bottom:0;">Ticket Promedio – Marcas HP</h1>
         <p style="color:#6F7277;font-size:0.95rem;margin-top:0.25rem;">
-        Ticket promedio por Día/Semana/Mes + variaciones y tendencias.
+        Ticket promedio por Día/Semana/Mes + variaciones, delivery y tendencias.
         </p>
         """,
         unsafe_allow_html=True,
@@ -119,7 +117,7 @@ with col_title:
 st.markdown("---")
 
 # =========================================================
-# URLs (mismos que tu página)
+# URL
 # =========================================================
 DATA_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSLIeswEs8OILxZmVMwObbli0Zpbbqx7g7h6ZC5Fwm0PCjlZEFy66L9Xpha6ROW3loFCIRiWvEnLRHS/pub?output=csv"
 
@@ -130,7 +128,6 @@ def fmt_money(x):
     return "—" if (x is None or pd.isna(x)) else f"${x:,.0f}"
 
 def fmt_pct_pp(x):
-    """x en proporción (0.12) -> '12%' """
     return "—" if (x is None or pd.isna(x)) else f"{x * 100:,.1f}%"
 
 def clean_money_series(s: pd.Series) -> pd.Series:
@@ -172,6 +169,20 @@ def periodo_label(serie_periodo: pd.Series, gran: str) -> pd.Series:
         return p.dt.strftime("Sem %d %b %Y")
     return p.dt.strftime("%b %Y")
 
+def is_delivery_tipo(val) -> bool:
+    try:
+        s = str(val).strip().lower()
+    except Exception:
+        return False
+
+    delivery_set = {
+        "delivery",
+        "delivery (delivery)",
+        "takeout",
+        "takeout (delivery)",
+    }
+    return s in delivery_set
+
 # =========================================================
 # Carga de datos
 # =========================================================
@@ -194,8 +205,8 @@ COL_TOTAL = "Total"
 COL_DESCUENTOS = "Descuentos"
 COL_FOLIO = "Folio"
 COL_VENTAS = "ventas_efectivas"
+COL_TIPO = "Tipo"
 
-# Validaciones mínimas
 missing = [c for c in [COL_CC, COL_FECHA, COL_TOTAL] if c not in df.columns]
 if missing:
     st.error(f"Faltan columnas en la base: {missing}")
@@ -221,7 +232,6 @@ else:
     df["_impuestos"] = (df[COL_TOTAL] - df[COL_SUBTOT]).clip(lower=0.0)
 
 is_void = get_void_mask(df, COL_ESTADO)
-
 df["_calc_sti_d"] = (df[COL_SUBTOT] + df["_impuestos"] - df[COL_DESCUENTOS]).fillna(0.0)
 df["_ventas_brutas_regla"] = np.where(df["_calc_sti_d"] > df[COL_TOTAL], df[COL_TOTAL], df["_calc_sti_d"])
 df[COL_VENTAS] = np.where(is_void, 0.0, pd.Series(df["_ventas_brutas_regla"], index=df.index).clip(lower=0.0))
@@ -231,7 +241,6 @@ df[COL_VENTAS] = np.where(is_void, 0.0, pd.Series(df["_ventas_brutas_regla"], in
 # =========================================================
 st.sidebar.markdown("### Filtros")
 
-# rango fechas
 if df[COL_FECHA].notna().any():
     min_f, max_f = df[COL_FECHA].min(), df[COL_FECHA].max()
     rango = st.sidebar.date_input("Rango de fechas", value=(min_f.date(), max_f.date()))
@@ -243,7 +252,6 @@ else:
     st.error("No hay fechas válidas en la base.")
     st.stop()
 
-# restaurantes
 rests_all = sorted(df[COL_CC].dropna().unique().tolist())
 sel_rests = st.sidebar.multiselect("Restaurantes", options=rests_all, default=rests_all)
 
@@ -260,7 +268,6 @@ rolling_n = st.sidebar.select_slider(
 # Filtrar
 # =========================================================
 df_f = df.copy()
-
 mask_date = (df_f[COL_FECHA].dt.date >= f_ini.date()) & (df_f[COL_FECHA].dt.date <= f_fin.date())
 df_f = df_f[mask_date]
 
@@ -272,14 +279,10 @@ if df_f.empty:
     st.stop()
 
 # =========================================================
-# Definición de tickets y cálculo de ticket promedio
-#   Ticket = Folio NO VOID (si existe Folio)
-#   Si no existe Folio -> fallback: cuenta de filas NO VOID (menos ideal)
+# Tickets
 # =========================================================
 if COL_FOLIO not in df_f.columns:
-    st.warning("No existe columna 'Folio'. Fallback: tickets = conteo de filas NO VOID (puede inflar tickets si hay múltiples filas por folio).")
-
-df_p = agregar_periodo(df_f, gran, COL_FECHA)
+    st.warning("No existe columna 'Folio'. Fallback: tickets = conteo de filas NO VOID (puede inflar tickets).")
 
 def tickets_no_void(g: pd.DataFrame) -> int:
     mvoid = get_void_mask(g, COL_ESTADO)
@@ -287,48 +290,83 @@ def tickets_no_void(g: pd.DataFrame) -> int:
         return int(g.loc[~mvoid, COL_FOLIO].nunique())
     return int((~mvoid).sum())
 
+# =========================================================
+# Serie por periodo
+# =========================================================
+df_p = agregar_periodo(df_f, gran, COL_FECHA)
+
+def safe_tipo_series(g: pd.DataFrame) -> pd.Series:
+    # Si no existe COL_TIPO en g, devolvemos una serie vacía alineada al index
+    if COL_TIPO in g.columns:
+        return g[COL_TIPO]
+    return pd.Series("", index=g.index)
+
 serie = (
     df_p.groupby("periodo", as_index=False)
     .apply(lambda g: pd.Series({
-        "ventas": float(g[COL_VENTAS].sum()),
-        "tickets": tickets_no_void(g),
-        "dias_con_datos": int(g[COL_FECHA].dt.date.nunique())
+        "ventas_totales": float(g[COL_VENTAS].sum()),
+        "tickets_totales": tickets_no_void(g),
+
+        "ventas_delivery": float(
+            g.loc[safe_tipo_series(g).map(is_delivery_tipo), COL_VENTAS].sum()
+        ),
+        "tickets_delivery": tickets_no_void(
+            g.loc[safe_tipo_series(g).map(is_delivery_tipo)]
+        ),
     }))
     .reset_index(drop=True)
     .sort_values("periodo")
 )
 
-serie["ticket_promedio"] = np.where(serie["tickets"] > 0, serie["ventas"] / serie["tickets"], np.nan)
+# Labels + orden
 serie["periodo_str"] = periodo_label(serie["periodo"], gran)
+orden_periodos = (
+    serie[["periodo", "periodo_str"]]
+    .drop_duplicates()
+    .sort_values("periodo")["periodo_str"]
+    .tolist()
+)
 
-# Orden correcto para eje x
-orden_periodos = serie[["periodo", "periodo_str"]].drop_duplicates().sort_values("periodo")["periodo_str"].tolist()
+# Ticket promedio total y delivery
+serie["ticket_promedio"] = np.where(
+    serie["tickets_totales"] > 0,
+    serie["ventas_totales"] / serie["tickets_totales"],
+    np.nan
+)
 
-# Variación vs periodo anterior
+serie["ticket_promedio_delivery"] = np.where(
+    serie["tickets_delivery"] > 0,
+    serie["ventas_delivery"] / serie["tickets_delivery"],
+    np.nan
+)
+
+# Variación vs periodo anterior (TOTAL)
 serie["tp_prev"] = serie["ticket_promedio"].shift(1)
 serie["var_abs"] = serie["ticket_promedio"] - serie["tp_prev"]
-serie["var_pct"] = np.where(serie["tp_prev"].notna() & (serie["tp_prev"] != 0),
-                            serie["var_abs"] / serie["tp_prev"],
-                            np.nan)
+serie["var_pct"] = np.where(
+    serie["tp_prev"].notna() & (serie["tp_prev"] != 0),
+    serie["var_abs"] / serie["tp_prev"],
+    np.nan
+)
 
 # Rolling
 if mostrar_rolling:
-    serie["tp_roll"] = serie["ticket_promedio"].rolling(rolling_n, min_periods=max(2, rolling_n//2)).mean()
+    serie["tp_roll"] = serie["ticket_promedio"].rolling(
+        rolling_n, min_periods=max(2, rolling_n // 2)
+    ).mean()
 
 # =========================================================
-# KPIs globales (con filtros)
+# KPIs globales
 # =========================================================
 ventas_tot = float(df_f[COL_VENTAS].sum())
 tickets_tot = tickets_no_void(df_f)
 tp_global = (ventas_tot / tickets_tot) if tickets_tot > 0 else np.nan
 
-# Último periodo disponible (no NaN)
-last_valid = serie.dropna(subset=["ticket_promedio"])
+last_valid = serie.dropna(subset=["ticket_promedio"]).copy()
 ult_tp = float(last_valid["ticket_promedio"].iloc[-1]) if not last_valid.empty else np.nan
 ult_var_pct = float(last_valid["var_pct"].iloc[-1]) if (not last_valid.empty and pd.notna(last_valid["var_pct"].iloc[-1])) else np.nan
 ult_var_abs = float(last_valid["var_abs"].iloc[-1]) if (not last_valid.empty and pd.notna(last_valid["var_abs"].iloc[-1])) else np.nan
 
-# Best/Worst period
 best_row = last_valid.loc[last_valid["ticket_promedio"].idxmax()] if not last_valid.empty else None
 worst_row = last_valid.loc[last_valid["ticket_promedio"].idxmin()] if not last_valid.empty else None
 
@@ -336,11 +374,9 @@ k1, k2, k3, k4 = st.columns(4)
 k1.metric("Ticket promedio (global)", fmt_money(tp_global))
 k2.metric("Ventas (global)", fmt_money(ventas_tot))
 k3.metric("Tickets (global)", f"{tickets_tot:,}")
+
 if pd.notna(ult_tp):
-    delta_txt = None
-    if pd.notna(ult_var_abs):
-        # Streamlit delta es string; ponemos $ abs y % como apoyo en un caption abajo
-        delta_txt = f"{ult_var_abs:,.0f}"
+    delta_txt = f"{ult_var_abs:,.0f}" if pd.notna(ult_var_abs) else None
     k4.metric(f"Último {gran.lower()} (ticket prom.)", fmt_money(ult_tp), delta=delta_txt)
     if pd.notna(ult_var_pct):
         st.caption(f"Variación vs periodo anterior: {fmt_pct_pp(ult_var_pct)}")
@@ -350,7 +386,7 @@ else:
 st.markdown("---")
 
 # =========================================================
-# Gráfica principal: Ticket Promedio en el tiempo
+# Gráfica principal
 # =========================================================
 st.markdown("### Ticket promedio en el tiempo")
 
@@ -361,11 +397,14 @@ line = base.mark_line(point=True).encode(
     y=alt.Y("ticket_promedio:Q", title="Ticket promedio", scale=alt.Scale(zero=False)),
     tooltip=[
         alt.Tooltip("periodo_str:N", title=gran),
-        alt.Tooltip("ventas:Q", title="Ventas", format=",.0f"),
-        alt.Tooltip("tickets:Q", title="Tickets", format=",.0f"),
+        alt.Tooltip("ventas_totales:Q", title="Ventas Totales", format=",.0f"),
+        alt.Tooltip("tickets_totales:Q", title="Tickets Totales", format=",.0f"),
         alt.Tooltip("ticket_promedio:Q", title="Ticket promedio", format=",.0f"),
         alt.Tooltip("var_abs:Q", title="Δ abs", format=",.0f"),
         alt.Tooltip("var_pct:Q", title="Δ %", format=".1%"),
+        alt.Tooltip("ventas_delivery:Q", title="Ventas Delivery", format=",.0f"),
+        alt.Tooltip("tickets_delivery:Q", title="Tickets Delivery", format=",.0f"),
+        alt.Tooltip("ticket_promedio_delivery:Q", title="Ticket Prom. Delivery", format=",.0f"),
     ],
 )
 
@@ -378,25 +417,23 @@ if mostrar_rolling and "tp_roll" in serie.columns:
         tooltip=[
             alt.Tooltip("periodo_str:N", title=gran),
             alt.Tooltip("tp_roll:Q", title=f"Rolling {rolling_n}", format=",.0f"),
-        ]
+        ],
     )
     layers.append(roll)
 
-chart_tp = alt.layer(*layers).properties(height=330)
-st.altair_chart(chart_tp, use_container_width=True)
+st.altair_chart(alt.layer(*layers).properties(height=330), use_container_width=True)
 
 # =========================================================
-# Gráfica secundaria: Variación % vs periodo anterior
+# Variación % vs anterior (TOTAL)
 # =========================================================
-st.markdown("### Incremento / decremento vs periodo anterior")
+st.markdown("### Incremento / decremento vs periodo anterior (Ticket total)")
 
-var_df = serie.copy()
-var_df["var_dir"] = np.where(var_df["var_pct"] >= 0, "Incremento", "Decremento")
-var_df = var_df.dropna(subset=["var_pct"])
-
+var_df = serie.dropna(subset=["var_pct"]).copy()
 if var_df.empty:
     st.info("Aún no hay suficientes periodos para calcular variación vs anterior.")
 else:
+    var_df["var_dir"] = np.where(var_df["var_pct"] >= 0, "Incremento", "Decremento")
+
     ch_var = (
         alt.Chart(var_df)
         .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
@@ -418,33 +455,31 @@ else:
 st.markdown("---")
 
 # =========================================================
-# Insights (concretos, accionables)
+# Insights
 # =========================================================
 st.markdown("### Insights")
-
 ins1, ins2, ins3 = st.columns(3)
 
 with ins1:
-    st.markdown("#### Mejor periodo")
+    st.markdown("#### Mejor periodo (ticket total)")
     if best_row is not None:
         st.write(f"**{best_row['periodo_str']}**")
         st.write(f"Ticket prom.: **{fmt_money(best_row['ticket_promedio'])}**")
-        st.write(f"Ventas: {fmt_money(best_row['ventas'])} · Tickets: {int(best_row['tickets']):,}")
+        st.write(f"Ventas Totales: {fmt_money(best_row['ventas_totales'])} · Tickets: {int(best_row['tickets_totales']):,}")
     else:
         st.write("—")
 
 with ins2:
-    st.markdown("#### Peor periodo")
+    st.markdown("#### Peor periodo (ticket total)")
     if worst_row is not None:
         st.write(f"**{worst_row['periodo_str']}**")
         st.write(f"Ticket prom.: **{fmt_money(worst_row['ticket_promedio'])}**")
-        st.write(f"Ventas: {fmt_money(worst_row['ventas'])} · Tickets: {int(worst_row['tickets']):,}")
+        st.write(f"Ventas Totales: {fmt_money(worst_row['ventas_totales'])} · Tickets: {int(worst_row['tickets_totales']):,}")
     else:
         st.write("—")
 
 with ins3:
-    st.markdown("#### Tendencia reciente")
-    # Tendencia simple: pendiente de regresión sobre últimos N puntos válidos
+    st.markdown("#### Tendencia reciente (ticket total)")
     recent_n = min(8, len(last_valid))
     if recent_n >= 3:
         sub = last_valid.tail(recent_n).copy()
@@ -454,36 +489,53 @@ with ins3:
         st.write(f"Últimos **{recent_n}** periodos:")
         st.write(f"Pendiente aprox.: **{slope:,.1f}** $/periodo")
         if slope > 0:
-            st.write("Lectura: tendencia **al alza** (ticket promedio subiendo).")
+            st.write("Lectura: tendencia **al alza**.")
         elif slope < 0:
-            st.write("Lectura: tendencia **a la baja** (ticket promedio bajando).")
+            st.write("Lectura: tendencia **a la baja**.")
         else:
             st.write("Lectura: tendencia **plana**.")
     else:
         st.write("—")
 
 # =========================================================
-# Tabla detalle (auditable)
+# Tabla detalle
 # =========================================================
 st.markdown("### Detalle por periodo")
 
-out = serie[["periodo_str", "ventas", "tickets", "ticket_promedio", "var_abs", "var_pct"]].copy()
+out = serie[[
+    "periodo_str",
+    "ventas_totales",
+    "tickets_totales",
+    "ticket_promedio",
+    "ventas_delivery",
+    "tickets_delivery",
+    "ticket_promedio_delivery",
+    "var_abs",
+    "var_pct",
+]].copy()
+
 out = out.rename(columns={
     "periodo_str": "Periodo",
-    "ventas": "Ventas",
-    "tickets": "Tickets",
+    "ventas_totales": "Ventas Totales",
+    "tickets_totales": "Tickets Totales",
     "ticket_promedio": "Ticket Promedio",
+    "ventas_delivery": "Ventas Delivery",
+    "tickets_delivery": "Tickets Delivery",
+    "ticket_promedio_delivery": "Ticket Promedio Delivery",
     "var_abs": "Δ abs vs ant",
     "var_pct": "Δ % vs ant",
 })
 
 st.dataframe(
     out.style.format({
-        "Ventas": "${:,.0f}",
+        "Ventas Totales": "${:,.0f}",
+        "Ventas Delivery": "${:,.0f}",
         "Ticket Promedio": "${:,.0f}",
+        "Ticket Promedio Delivery": "${:,.0f}",
         "Δ abs vs ant": "${:,.0f}",
         "Δ % vs ant": "{:.1%}",
-        "Tickets": "{:,.0f}",
+        "Tickets Totales": "{:,.0f}",
+        "Tickets Delivery": "{:,.0f}",
     }),
     use_container_width=True
 )
